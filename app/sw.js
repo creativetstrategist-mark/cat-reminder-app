@@ -1,7 +1,7 @@
 // Lets the app open without internet. Always tries the network first so
 // updates show up straight away, and falls back to the saved copy offline.
 
-const CACHE = 'cat-reminders-v3';
+const CACHE = 'cat-reminders-v4';
 const FILES = [
   './',
   './index.html',
@@ -42,8 +42,17 @@ self.addEventListener('fetch', (event) => {
   const { request } = event;
   if (request.method !== 'GET' || new URL(request.url).origin !== self.location.origin) return;
 
+  // Ask the server whether each file changed (cheap when it hasn't) instead of
+  // trusting the browser's own cache, which GitHub Pages lets keep files for
+  // 10 minutes. That way a new version shows up the next time the app opens.
+  const fresh = fetch(request.url, {
+    cache: 'no-cache',
+    credentials: 'same-origin',
+    redirect: request.mode === 'navigate' ? 'manual' : 'follow',
+  });
+
   event.respondWith(
-    fetch(request)
+    fresh
       .then((response) => {
         if (response.ok) {
           const copy = response.clone();

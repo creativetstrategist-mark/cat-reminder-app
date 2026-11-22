@@ -1022,5 +1022,18 @@ if (cloud.isConfigured) {
 }
 
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+  // When a new version of the app takes over, reload so it shows straight away
+  // (or offer to, if a form is open).
+  const updating = Boolean(navigator.serviceWorker.controller);
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!updating || reloaded) return;
+    if (document.querySelector('dialog[open]')) {
+      notify('A new version of Cat Reminders is ready.', { action: 'Reload', onAction: () => location.reload() });
+      return;
+    }
+    reloaded = true;
+    location.reload();
+  });
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
