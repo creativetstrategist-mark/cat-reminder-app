@@ -3,6 +3,12 @@
 //
 // These values are not secret. They only say which project to talk to; who can
 // read and change data is decided by firestore.rules.
-//
-// While this is null, the app shows a "not connected yet" screen.
-export const firebaseConfig = null;
+export const firebaseConfig = {
+  apiKey: 'AIzaSyDhyLKZTGvad4_6NkfoN0nymfLcbmuDwwQ',
+  authDomain: 'cat-reminders.firebaseapp.com',
+  projectId: 'cat-reminders',
+  storageBucket: 'cat-reminders.firebasestorage.app',
+  messagingSenderId: '631565757918',
+  appId: '1:631565757918:web:cfeedbd30ca2825aa9814f',
+  measurementId: 'G-3Z7E049MN7',
+};
