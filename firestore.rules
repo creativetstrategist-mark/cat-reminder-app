@@ -1,0 +1,29 @@
+rules_version = '2';
+
+// Each account can only read and change its own cats, stored at
+// users/{their user id}/cats/{cat id}. Everything else is closed.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    function isValidCat(cat) {
+      return cat.keys().hasOnly(['name', 'birthDate', 'sex', 'outdoor', 'notes', 'records', 'updatedAt'])
+        && cat.keys().hasAll(['name', 'birthDate', 'records', 'updatedAt'])
+        && cat.name is string && cat.name.size() > 0 && cat.name.size() <= 60
+        && cat.birthDate is string && cat.birthDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && cat.get('sex', '') in ['', 'female', 'male']
+        && cat.get('outdoor', false) is bool
+        && cat.get('notes', '') is string && cat.get('notes', '').size() <= 1000
+        && cat.records is list && cat.records.size() <= 1000
+        && cat.updatedAt == request.time;
+    }
+
+    match /users/{userId}/cats/{catId} {
+      allow read, delete: if isOwner(userId);
+      allow create, update: if isOwner(userId) && isValidCat(request.resource.data);
+    }
+  }
+}

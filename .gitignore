@@ -13,3 +13,7 @@ build/
 .DS_Store
 .vscode/
 .idea/
+
+# Firebase emulator logs and cache
+*-debug.log
+.firebase/

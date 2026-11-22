@@ -1,65 +1,42 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { STORAGE_KEY, loadState, saveState, exportState, parseBackup, normalizeState } from '../app/js/store.js';
+import { normalizeCat, exportBackup, parseBackup } from '../app/js/store.js';
 
-class MemoryStorage {
-  constructor(entries = {}) {
-    this.map = new Map(Object.entries(entries));
-  }
-  getItem(key) {
-    return this.map.has(key) ? this.map.get(key) : null;
-  }
-  setItem(key, value) {
-    this.map.set(key, String(value));
-  }
-}
-
-const sample = {
-  version: 1,
-  cats: [
-    {
-      id: 'cat-1',
-      name: ' Mochi ',
-      birthDate: '2026-01-01',
-      sex: 'female',
-      outdoor: false,
-      notes: '',
-      records: [{ id: 'r-1', type: 'fvrcp', date: '2026-02-26', product: 'Felocell', notes: '', nextDue: '2026-03-26' }],
-    },
-    { name: 'Luna', birthDate: '2024-05-10' },
-  ],
+const mochi = {
+  id: 'cat-1',
+  name: ' Mochi ',
+  birthDate: '2026-01-01',
+  sex: 'female',
+  outdoor: false,
+  notes: '',
+  records: [{ id: 'r-1', type: 'fvrcp', date: '2026-02-26', product: 'Felocell', notes: '', nextDue: '2026-03-26' }],
 };
 
-test('saved cats load back the same', () => {
-  const storage = new MemoryStorage();
-  const state = normalizeState(sample);
-  saveState(state, storage);
-  assert.deepEqual(loadState(storage), state);
+test('normalizeCat trims text and fills in missing fields', () => {
+  const cat = normalizeCat(mochi);
+  assert.equal(cat.name, 'Mochi');
+  assert.equal(cat.records[0].product, 'Felocell');
+
+  const luna = normalizeCat({ name: 'Luna', birthDate: '2024-05-10' });
+  assert.equal(luna.sex, '');
+  assert.equal(luna.outdoor, false);
+  assert.deepEqual(luna.records, []);
+  assert.ok(luna.id);
 });
 
-test('normalizeState trims text and fills in missing fields', () => {
-  const state = normalizeState(sample);
-  assert.equal(state.cats[0].name, 'Mochi');
-  assert.equal(state.cats[1].sex, '');
-  assert.equal(state.cats[1].outdoor, false);
-  assert.deepEqual(state.cats[1].records, []);
-  assert.ok(state.cats[1].id);
+test('normalizeCat drops unknown fields, such as database timestamps', () => {
+  const cat = normalizeCat({ ...mochi, updatedAt: { seconds: 1 }, isAdmin: true });
+  assert.deepEqual(Object.keys(cat).sort(), ['birthDate', 'id', 'name', 'notes', 'outdoor', 'records', 'sex']);
 });
 
-test('an empty device starts with no cats', () => {
-  assert.deepEqual(loadState(new MemoryStorage()), { version: 1, cats: [] });
-});
-
-test('unreadable saved data is kept aside, not thrown away', () => {
-  const storage = new MemoryStorage({ [STORAGE_KEY]: '{broken' });
-  assert.deepEqual(loadState(storage).cats, []);
-  const kept = [...storage.map.keys()].find((key) => key.startsWith(`${STORAGE_KEY}:unreadable-`));
-  assert.equal(storage.getItem(kept), '{broken');
+test('ids that are unsafe as database paths are replaced', () => {
+  assert.notEqual(normalizeCat({ ...mochi, id: '../../users/bob' }).id, '../../users/bob');
+  assert.equal(normalizeCat({ ...mochi, id: 'abc-123_X' }).id, 'abc-123_X');
 });
 
 test('a backup file round-trips', () => {
-  const state = normalizeState(sample);
-  assert.deepEqual(parseBackup(exportState(state)), state);
+  const cats = [normalizeCat(mochi), normalizeCat({ name: 'Luna', birthDate: '2024-05-10' })];
+  assert.deepEqual(parseBackup(exportBackup(cats)), cats);
 });
 
 test('bad backup files are rejected with a clear message', () => {

@@ -5,9 +5,18 @@
   "description": "Deworming and vaccine reminders for your cats.",
   "type": "module",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test tests/*.test.js",
+    "test:rules": "firebase emulators:exec --only firestore --project demo-cat-reminders \"node --test tests/rules/firestore-rules.spec.js\"",
+    "emulators": "firebase emulators:start --only auth,firestore --project demo-cat-reminders",
+    "build:firebase": "node scripts/build-firebase.js"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "6.0.0",
+    "esbuild": "0.28.2",
+    "firebase": "13.4.0",
+    "firebase-tools": "15.37.0"
   }
 }

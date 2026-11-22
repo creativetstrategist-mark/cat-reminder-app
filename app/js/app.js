@@ -1,10 +1,21 @@
-import { TYPES, TYPE_INFO, nextDue, dueStatus, upcoming, doseLabels, dueList, mostUrgent } from './schedule.js';
+import { TYPES, TYPE_INFO, upcoming, dueStatus, doseLabels, dueList, mostUrgent } from './schedule.js';
 import { todayISO, formatDate, ageText, isValidDate } from './dates.js';
-import { loadState, saveState, exportState, parseBackup, newId } from './store.js';
+import { exportBackup, parseBackup, newId } from './store.js';
+import * as cloud from './cloud.js';
 
-let state = loadState();
+const state = {
+  authReady: false, // has Firebase told us whether someone is signed in?
+  user: null,
+  cats: [],
+  catsLoaded: false,
+  loadError: '',
+  authMode: 'signin', // or 'signup'
+};
+let stopWatchingCats = null;
 
 const app = document.getElementById('app');
+const accountLink = document.getElementById('account-link');
+const toast = document.getElementById('toast');
 const catDialog = document.getElementById('cat-dialog');
 const catForm = document.getElementById('cat-form');
 const recordDialog = document.getElementById('record-dialog');
@@ -18,16 +29,6 @@ const recordFields = recordForm.elements;
 
 function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-}
-
-function persist() {
-  try {
-    saveState(state);
-    return true;
-  } catch (error) {
-    alert(`Could not save on this device: ${error.message}`);
-    return false;
-  }
 }
 
 const findCat = (id) => state.cats.find((cat) => cat.id === id);
@@ -58,7 +59,88 @@ function whenText({ status, days, catchUp }) {
   return `In ${Math.round(days / 30.44)} months`;
 }
 
-// ---------- views ----------
+let toastTimer;
+function notify(message) {
+  toast.textContent = message;
+  toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (toast.hidden = true), 6000);
+}
+
+// ---------- saving ----------
+// Changes show on screen straight away; Firebase saves them in the background
+// (and queues them while offline), then the live update confirms them.
+
+function commitCat(cat) {
+  const exists = state.cats.some((c) => c.id === cat.id);
+  state.cats = exists ? state.cats.map((c) => (c.id === cat.id ? cat : c)) : [...state.cats, cat];
+  render();
+  cloud.saveCat(state.user.uid, cat).catch((error) => notify(`Couldn’t save ${cat.name}. ${cloud.friendlyError(error)}`));
+}
+
+function dropCat(cat) {
+  state.cats = state.cats.filter((c) => c.id !== cat.id);
+  render();
+  cloud.removeCat(state.user.uid, cat.id).catch((error) => notify(`Couldn’t delete ${cat.name}. ${cloud.friendlyError(error)}`));
+}
+
+// ---------- views: signed out ----------
+
+const GOOGLE_ICON = `<svg viewBox="0 0 48 48" width="18" height="18" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>`;
+
+function authView() {
+  const signup = state.authMode === 'signup';
+  return `
+    <section class="card auth">
+      <img src="icons/icon.svg" alt="" width="64" height="64">
+      <h1>${signup ? 'Create your account' : 'Welcome back'}</h1>
+      <p class="muted">Keep every cat’s deworming and vaccines on time, on all your devices.</p>
+      <button type="button" class="btn google" data-action="google">${GOOGLE_ICON}<span>Continue with Google</span></button>
+      <div class="divider"><span>or with email</span></div>
+      <form id="auth-form" novalidate>
+        <label class="field">
+          <span>Email</span>
+          <input type="email" name="email" autocomplete="email" inputmode="email" required>
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input type="password" name="password" autocomplete="${signup ? 'new-password' : 'current-password'}" required minlength="6">
+          ${signup ? '<small class="hint">At least 6 characters.</small>' : ''}
+        </label>
+        <p class="form-error" role="alert" hidden></p>
+        <p class="form-info" role="status" hidden></p>
+        <button type="submit" class="btn primary">${signup ? 'Create account' : 'Sign in'}</button>
+        ${signup ? '' : '<button type="button" class="link" data-action="forgot">Forgot password?</button>'}
+      </form>
+      <p class="switch">
+        ${signup
+          ? 'Already have an account? <button type="button" class="link" data-action="auth-mode" data-mode="signin">Sign in</button>'
+          : 'New here? <button type="button" class="link" data-action="auth-mode" data-mode="signup">Create an account</button>'}
+      </p>
+    </section>`;
+}
+
+function setupView() {
+  return `
+    <section class="card empty">
+      <img src="icons/icon.svg" alt="" width="64" height="64">
+      <h1>Almost ready</h1>
+      <p class="muted">This app isn’t connected to its Firebase project yet, so nobody can sign in. The setup steps are in the project’s README.</p>
+    </section>`;
+}
+
+const loadingView = () => '<p class="loading muted" role="status">Loading…</p>';
+
+function loadErrorView() {
+  return `
+    <section class="card empty">
+      <h1>Couldn’t load your cats</h1>
+      <p class="muted">${esc(state.loadError)}</p>
+      <button class="btn primary" data-action="reload">Try again</button>
+    </section>`;
+}
+
+// ---------- views: signed in ----------
 
 function dueRow(item) {
   const info = TYPE_INFO[item.type];
@@ -98,29 +180,19 @@ function catCard(cat, today) {
     </li>`;
 }
 
-function backupSection() {
-  return `
-    <section class="card backup">
-      <h2>Backup</h2>
-      <p class="muted">Your cats are saved on this device only. Download a backup now and then, and use it to move everything to a new phone.</p>
-      <div class="row">
-        <button class="btn" data-action="export"${state.cats.length ? '' : ' disabled'}>Download backup</button>
-        <button class="btn ghost" data-action="import">Restore from backup</button>
-      </div>
-    </section>
-    <p class="disclaimer">Default schedules follow common vet guidelines. Your vet knows your cat best, so enter the dates they give you when you have them.</p>`;
-}
+const disclaimer = () =>
+  '<p class="disclaimer">Default schedules follow common vet guidelines. Your vet knows your cat best, so enter the dates they give you when you have them.</p>';
 
 function homeView(today) {
   if (state.cats.length === 0) {
     return `
       <section class="empty card">
         <img src="icons/icon.svg" alt="" width="72" height="72">
-        <h1>Keep every cat's shots on time</h1>
+        <h1>Keep every cat’s shots on time</h1>
         <p class="muted">Add your cats and the app works out when deworming, the 4-in-1 vaccine and the anti-rabies vaccine are due.</p>
         <button class="btn primary" data-action="add-cat">Add your first cat</button>
       </section>
-      ${backupSection()}`;
+      ${disclaimer()}`;
   }
 
   const cats = [...state.cats].sort(byName);
@@ -142,7 +214,7 @@ function homeView(today) {
       </div>
       <ul class="cat-list">${cats.map((cat) => catCard(cat, today)).join('')}</ul>
     </section>
-    ${backupSection()}`;
+    ${disclaimer()}`;
 }
 
 function scheduleCard(cat, type, today) {
@@ -191,7 +263,7 @@ function scheduleCard(cat, type, today) {
                   ${record.product || record.notes || record.nextDue ? `<div class="muted small">${[
                     record.product && esc(record.product),
                     record.notes && esc(record.notes),
-                    record.nextDue && `Vet's next date: ${esc(formatDate(record.nextDue))}`,
+                    record.nextDue && `Vet’s next date: ${esc(formatDate(record.nextDue))}`,
                   ].filter(Boolean).join(' · ')}</div>` : ''}
                 </div>
                 <button class="btn small ghost" data-action="edit-record" data-cat="${esc(cat.id)}" data-record="${esc(record.id)}" aria-label="Edit record from ${esc(formatDate(record.date))}">Edit</button>
@@ -208,7 +280,7 @@ function catView(cat, today) {
     cat.sex === 'female' ? 'Female' : cat.sex === 'male' ? 'Male' : '',
     cat.outdoor ? 'Goes outside' : 'Indoor',
   ].filter(Boolean);
-  const noRecords = (cat.records ?? []).length === 0;
+  const noRecords = cat.records.length === 0;
 
   return `
     <a href="#/" class="back">← All cats</a>
@@ -224,7 +296,7 @@ function catView(cat, today) {
 
     ${noRecords ? `
       <section class="card tip">
-        <p><strong>Already had shots or deworming?</strong> Add them from the vaccine card so ${esc(cat.name)}'s schedule is right.</p>
+        <p><strong>Already had shots or deworming?</strong> Add them from the vaccine card so ${esc(cat.name)}’s schedule is right.</p>
         <button class="btn small" data-action="log" data-cat="${esc(cat.id)}">Add past record</button>
       </section>` : ''}
 
@@ -239,29 +311,167 @@ function catView(cat, today) {
     </div>`;
 }
 
+function accountView() {
+  const { user } = state;
+  const withGoogle = user.providerData.some((p) => p.providerId === 'google.com');
+  return `
+    <a href="#/" class="back">← All cats</a>
+    <section class="card account">
+      <h1>Account</h1>
+      <p class="muted">Signed in as <strong class="email">${esc(user.email ?? 'unknown')}</strong>${withGoogle ? ' with Google' : ''}.</p>
+      <div class="row"><button class="btn" data-action="sign-out">Sign out</button></div>
+    </section>
+    <section class="card backup">
+      <h2>Your data</h2>
+      <p class="muted">Your cats are saved to your account, so they show up on every phone or computer you sign in on. Only you can see them.</p>
+      <div class="row">
+        <button class="btn" data-action="export"${state.cats.length ? '' : ' disabled'}>Download a copy</button>
+        <button class="btn ghost" data-action="import">Import from a backup file</button>
+      </div>
+    </section>
+    <section class="card">
+      <h2>Delete account</h2>
+      <p class="muted">Permanently deletes your account and all your cats’ records.</p>
+      <div class="row"><button class="btn danger-ghost" data-action="delete-account">Delete my account</button></div>
+    </section>`;
+}
+
+// ---------- routing ----------
+
 function currentRoute() {
+  if (location.hash === '#/account') return { view: 'account' };
   const match = location.hash.match(/^#\/cat\/(.+)$/);
   return match ? { view: 'cat', id: decodeURIComponent(match[1]) } : { view: 'home' };
 }
 
 function render() {
+  const signedIn = Boolean(state.user);
+  accountLink.hidden = !signedIn;
+  if (signedIn) {
+    const label = state.user.email ?? 'Account';
+    accountLink.textContent = [...label][0].toUpperCase();
+    accountLink.title = `Account: ${label}`;
+  }
+
+  if (!cloud.isConfigured) return show(setupView(), 'Cat Reminders');
+  if (!state.authReady) return show(loadingView(), 'Cat Reminders');
+  if (!signedIn) return show(authView(), 'Sign in · Cat Reminders');
+  if (state.loadError) return show(loadErrorView(), 'Cat Reminders');
+  if (!state.catsLoaded) return show(loadingView(), 'Cat Reminders');
+
   const today = todayISO();
   const route = currentRoute();
+  if (route.view === 'account') return show(accountView(), 'Account · Cat Reminders');
   if (route.view === 'cat') {
     const cat = findCat(route.id);
     if (!cat) {
       location.replace('#/');
       return;
     }
-    app.innerHTML = catView(cat, today);
-    document.title = `${cat.name} · Cat Reminders`;
-  } else {
-    app.innerHTML = homeView(today);
-    document.title = 'Cat Reminders';
+    return show(catView(cat, today), `${cat.name} · Cat Reminders`);
+  }
+  return show(homeView(today), 'Cat Reminders');
+}
+
+function show(html, title) {
+  app.innerHTML = html;
+  document.title = title;
+}
+
+// ---------- signing in ----------
+
+function authMessage(form, { error = '', info = '' }) {
+  const errorBox = form.querySelector('.form-error');
+  const infoBox = form.querySelector('.form-info');
+  errorBox.textContent = error;
+  errorBox.hidden = !error;
+  infoBox.textContent = info;
+  infoBox.hidden = !info;
+}
+
+function setBusy(busy) {
+  app.querySelectorAll('.auth button').forEach((button) => (button.disabled = busy));
+}
+
+async function submitAuth(form) {
+  const email = form.elements.email.value.trim();
+  const password = form.elements.password.value;
+  const signup = state.authMode === 'signup';
+  authMessage(form, {});
+  if (!email) return authMessage(form, { error: 'Enter your email address.' });
+  if (!password) return authMessage(form, { error: 'Enter your password.' });
+  if (signup && password.length < 6) return authMessage(form, { error: 'Use a password with at least 6 characters.' });
+
+  setBusy(true);
+  try {
+    await (signup ? cloud.signUp(email, password) : cloud.signIn(email, password));
+    // watchUser takes it from here.
+  } catch (error) {
+    authMessage(form, { error: cloud.friendlyError(error) });
+    setBusy(false);
   }
 }
 
-// ---------- forms ----------
+async function forgotPassword() {
+  const form = document.getElementById('auth-form');
+  const email = form.elements.email.value.trim();
+  if (!email) {
+    authMessage(form, { error: 'Enter your email address above, then tap “Forgot password?” again.' });
+    form.elements.email.focus();
+    return;
+  }
+  setBusy(true);
+  try {
+    await cloud.resetPassword(email);
+    authMessage(form, { info: `If there’s an account for ${email}, a link to reset the password is on its way. Check your inbox.` });
+  } catch (error) {
+    if (error?.code === 'auth/user-not-found') {
+      authMessage(form, { info: `If there’s an account for ${email}, a link to reset the password is on its way. Check your inbox.` });
+    } else {
+      authMessage(form, { error: cloud.friendlyError(error) });
+    }
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function googleSignIn() {
+  const form = document.getElementById('auth-form');
+  authMessage(form, {});
+  setBusy(true);
+  try {
+    await cloud.signInWithGoogle();
+  } catch (error) {
+    if (!cloud.isCancelled(error)) authMessage(form, { error: cloud.friendlyError(error) });
+    setBusy(false);
+  }
+}
+
+function switchAuthMode(mode) {
+  const email = document.getElementById('auth-form')?.elements.email.value ?? '';
+  state.authMode = mode;
+  render();
+  const form = document.getElementById('auth-form');
+  form.elements.email.value = email;
+  (email ? form.elements.password : form.elements.email).focus();
+}
+
+async function deleteAccount() {
+  const { user } = state;
+  if (!confirm('Delete your account and all your cats’ records? This cannot be undone.')) return;
+  if (!cloud.signedInRecently(user)) {
+    alert('For your security, please sign in again, then delete your account.');
+    await cloud.signOut();
+    return;
+  }
+  try {
+    await cloud.deleteAccount(user);
+  } catch (error) {
+    alert(cloud.friendlyError(error));
+  }
+}
+
+// ---------- cat and record forms ----------
 
 function showError(form, message) {
   const box = form.querySelector('.form-error');
@@ -302,15 +512,14 @@ catForm.addEventListener('submit', (event) => {
     if (firstRecord && birthDate > firstRecord) {
       return showError(catForm, `The birthday cannot be after the first record (${formatDate(firstRecord)}).`);
     }
-    Object.assign(existing, fields);
+    catDialog.close();
+    commitCat({ ...existing, ...fields });
   } else {
     const cat = { id: newId(), ...fields, records: [] };
-    state.cats.push(cat);
+    catDialog.close();
+    commitCat(cat);
     location.hash = `#/cat/${encodeURIComponent(cat.id)}`;
   }
-  persist();
-  catDialog.close();
-  render();
 });
 
 let editing = { catId: null, recordId: null };
@@ -345,8 +554,8 @@ recordForm.addEventListener('submit', (event) => {
   const nextDueDate = recordFields.nextDue.value;
   if (!isValidDate(date)) return showError(recordForm, 'Please enter the date it was given.');
   if (date > todayISO()) return showError(recordForm, 'The date given cannot be in the future.');
-  if (date < cat.birthDate) return showError(recordForm, `The date cannot be before ${cat.name}'s birthday.`);
-  if (nextDueDate && nextDueDate <= date) return showError(recordForm, "The vet's next date must be after the date given.");
+  if (date < cat.birthDate) return showError(recordForm, `The date cannot be before ${cat.name}’s birthday.`);
+  if (nextDueDate && nextDueDate <= date) return showError(recordForm, 'The vet’s next date must be after the date given.');
 
   const fields = {
     type: recordFields.type.value,
@@ -355,12 +564,11 @@ recordForm.addEventListener('submit', (event) => {
     notes: recordFields.notes.value.trim(),
     nextDue: nextDueDate,
   };
-  const existing = editing.recordId && cat.records.find((r) => r.id === editing.recordId);
-  if (existing) Object.assign(existing, fields);
-  else cat.records.push({ id: newId(), ...fields });
-  persist();
+  const records = editing.recordId
+    ? cat.records.map((r) => (r.id === editing.recordId ? { ...r, ...fields } : r))
+    : [...cat.records, { id: newId(), ...fields }];
   recordDialog.close();
-  render();
+  commitCat({ ...cat, records });
 });
 
 recordDialog.querySelector('#record-delete').addEventListener('click', () => {
@@ -368,10 +576,8 @@ recordDialog.querySelector('#record-delete').addEventListener('click', () => {
   const record = cat?.records.find((r) => r.id === editing.recordId);
   if (!record) return;
   if (!confirm(`Delete the ${TYPE_INFO[record.type].name.toLowerCase()} record from ${formatDate(record.date)}?`)) return;
-  cat.records = cat.records.filter((r) => r.id !== record.id);
-  persist();
   recordDialog.close();
-  render();
+  commitCat({ ...cat, records: cat.records.filter((r) => r.id !== record.id) });
 });
 
 for (const dialog of [catDialog, recordDialog]) {
@@ -382,12 +588,12 @@ for (const dialog of [catDialog, recordDialog]) {
 
 // ---------- backup ----------
 
-function downloadBackup() {
-  const blob = new Blob([exportState(state)], { type: 'application/json' });
+function downloadCopy() {
+  const blob = new Blob([exportBackup(state.cats)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = `cat-reminders-backup-${todayISO()}.json`;
+  link.download = `cat-reminders-${todayISO()}.json`;
   document.body.append(link);
   link.click();
   link.remove();
@@ -397,17 +603,14 @@ function downloadBackup() {
 importInput.addEventListener('change', async () => {
   const file = importInput.files[0];
   importInput.value = '';
-  if (!file) return;
+  if (!file || !state.user) return;
   try {
-    const restored = parseBackup(await file.text());
-    const message = state.cats.length
-      ? `Replace the ${plural(state.cats.length, 'cat')} on this device with the ${plural(restored.cats.length, 'cat')} in the backup?`
-      : `Restore ${plural(restored.cats.length, 'cat')} from the backup?`;
-    if (!confirm(message)) return;
-    state = restored;
-    persist();
+    const cats = parseBackup(await file.text());
+    if (cats.length === 0) return alert('This backup has no cats in it.');
+    if (!confirm(`Add ${plural(cats.length, 'cat')} from this backup to your account? Cats imported before are updated, not doubled.`)) return;
+    cats.forEach(commitCat);
     location.hash = '#/';
-    render();
+    notify(`Imported ${plural(cats.length, 'cat')}.`);
   } catch (error) {
     alert(error.message);
   }
@@ -421,20 +624,35 @@ document.addEventListener('click', (event) => {
   const { action } = button.dataset;
   const cat = button.dataset.cat ? findCat(button.dataset.cat) : null;
 
-  if (action === 'add-cat') openCatDialog();
-  else if (action === 'edit-cat' && cat) openCatDialog(cat);
-  else if (action === 'log' && cat) openRecordDialog(cat, { type: button.dataset.type });
-  else if (action === 'edit-record' && cat) {
+  switch (action) {
+    case 'google': return googleSignIn();
+    case 'forgot': return forgotPassword();
+    case 'auth-mode': return switchAuthMode(button.dataset.mode);
+    case 'reload': return location.reload();
+    case 'sign-out': return cloud.signOut();
+    case 'delete-account': return deleteAccount();
+    case 'add-cat': return openCatDialog();
+    case 'export': return downloadCopy();
+    case 'import': return importInput.click();
+  }
+  if (!cat) return;
+  if (action === 'edit-cat') openCatDialog(cat);
+  else if (action === 'log') openRecordDialog(cat, { type: button.dataset.type });
+  else if (action === 'edit-record') {
     const record = cat.records.find((r) => r.id === button.dataset.record);
     if (record) openRecordDialog(cat, { record });
-  } else if (action === 'delete-cat' && cat) {
-    if (!confirm(`Delete ${cat.name} and all of ${cat.name}'s records? This cannot be undone.`)) return;
-    state.cats = state.cats.filter((c) => c.id !== cat.id);
-    persist();
+  } else if (action === 'delete-cat') {
+    if (!confirm(`Delete ${cat.name} and all of ${cat.name}’s records? This cannot be undone.`)) return;
     location.hash = '#/';
-    render();
-  } else if (action === 'export') downloadBackup();
-  else if (action === 'import') importInput.click();
+    dropCat(cat);
+  }
+});
+
+document.addEventListener('submit', (event) => {
+  if (event.target.id === 'auth-form') {
+    event.preventDefault();
+    submitAuth(event.target);
+  }
 });
 
 window.addEventListener('hashchange', () => {
@@ -444,13 +662,40 @@ window.addEventListener('hashchange', () => {
 
 // Refresh "today" when the app comes back to the foreground.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') render();
+  if (document.visibilityState === 'visible' && state.user) render();
 });
+
+// ---------- start ----------
 
 render();
 
-// Ask the browser not to clear our data when space runs low.
-navigator.storage?.persist?.().catch(() => {});
+if (cloud.isConfigured) {
+  cloud.watchUser((user) => {
+    stopWatchingCats?.();
+    stopWatchingCats = null;
+    Object.assign(state, { authReady: true, user, cats: [], catsLoaded: false, loadError: '' });
+    if (user) {
+      stopWatchingCats = cloud.watchCats(
+        user.uid,
+        (cats) => {
+          state.cats = cats;
+          state.catsLoaded = true;
+          render();
+        },
+        (error) => {
+          state.loadError = cloud.friendlyError(error);
+          render();
+        },
+      );
+    } else {
+      catDialog.close();
+      recordDialog.close();
+      // Signed out (here or on another device): start the next sign-in at home.
+      if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+    }
+    render();
+  });
+}
 
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
