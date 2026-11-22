@@ -1,0 +1,13 @@
+{
+  "name": "cat-reminder-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Deworming and vaccine reminders for your cats.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
