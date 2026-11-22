@@ -12,3 +12,8 @@ export const firebaseConfig = {
   appId: '1:631565757918:web:cfeedbd30ca2825aa9814f',
   measurementId: 'G-3Z7E049MN7',
 };
+
+// The Google sign-in "Web client ID" used to connect Google Calendar. Find it in
+// Firebase: Authentication → Sign-in method → Google → Web SDK configuration.
+// While this is null, the Google Calendar option is hidden.
+export const googleCalendarClientId = null;

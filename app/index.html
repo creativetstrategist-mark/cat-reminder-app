@@ -4,12 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Cat Reminders</title>
-  <meta name="description" content="Deworming and vaccine schedules for your cats.">
-  <meta name="theme-color" content="#fbf7f2" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#1c1815" media="(prefers-color-scheme: dark)">
+  <meta name="description" content="Deworming and vaccine schedules for your cats, with Google Calendar reminders.">
+  <meta name="theme-color" content="#fff7ee" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1e1813" media="(prefers-color-scheme: dark)">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="preload" href="fonts/nunito.woff2" as="font" type="font/woff2" crossorigin>
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="Cat Reminders">
   <link rel="stylesheet" href="css/styles.css">
@@ -18,7 +19,7 @@
 <body>
   <header class="topbar">
     <a href="#/" class="brand">
-      <img src="icons/icon.svg" alt="" width="28" height="28">
+      <img src="icons/icon.svg" alt="" width="34" height="34">
       <span>Cat Reminders</span>
     </a>
     <a href="#/account" id="account-link" class="account-link" aria-label="Account" hidden></a>
@@ -26,7 +27,10 @@
 
   <main id="app" class="page" aria-live="polite"></main>
 
-  <div id="toast" class="toast" role="status" hidden></div>
+  <div id="toast" class="toast" role="status" hidden>
+    <span class="toast-text"></span>
+    <button type="button" class="toast-action" hidden></button>
+  </div>
 
   <input type="file" id="import-file" accept="application/json,.json" hidden>
 
@@ -35,13 +39,17 @@
       <h2 id="cat-dialog-title">Add a cat</h2>
       <label class="field">
         <span>Name</span>
-        <input name="name" required maxlength="40" autocomplete="off">
+        <input name="name" required maxlength="40" autocomplete="off" placeholder="e.g. Mochi">
       </label>
       <label class="field">
         <span>Birthday</span>
         <input type="date" name="birthDate" required>
-        <small class="hint">Not sure? An estimate is fine. The schedule is worked out from this date.</small>
+        <small class="hint">Not sure? A guess is fine. Their whole deworming and vaccine schedule is worked out from this date.</small>
       </label>
+      <fieldset class="field coat-picker">
+        <legend>Coat <em>(optional)</em></legend>
+        <div class="coats" id="coat-options"></div>
+      </fieldset>
       <label class="field">
         <span>Sex <em>(optional)</em></span>
         <select name="sex">
@@ -59,7 +67,7 @@
       </label>
       <label class="field">
         <span>Notes <em>(optional)</em></span>
-        <textarea name="notes" rows="2" maxlength="500" placeholder="Breed, colour, vet clinic…"></textarea>
+        <textarea name="notes" rows="2" maxlength="500" placeholder="Breed, favourite treats, vet clinic…"></textarea>
       </label>
       <p class="form-error" role="alert" hidden></p>
       <div class="dialog-actions">
@@ -71,7 +79,7 @@
 
   <dialog id="record-dialog" aria-labelledby="record-dialog-title">
     <form id="record-form" novalidate>
-      <h2 id="record-dialog-title">Add a record</h2>
+      <h2 id="record-dialog-title">Add a past dose</h2>
       <p class="dialog-sub" id="record-dialog-cat"></p>
       <label class="field">
         <span>What was given</span>
@@ -92,7 +100,7 @@
       <label class="field">
         <span>Next date from the vet <em>(optional)</em></span>
         <input type="date" name="nextDue">
-        <small class="hint">If the vet wrote a next date on the vaccine card, enter it and the app will use it instead of the default schedule.</small>
+        <small class="hint">If the vet wrote a next date on the vaccine card, enter it and the app will use it instead of the usual schedule.</small>
       </label>
       <label class="field">
         <span>Notes <em>(optional)</em></span>

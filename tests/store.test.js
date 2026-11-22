@@ -26,7 +26,13 @@ test('normalizeCat trims text and fills in missing fields', () => {
 
 test('normalizeCat drops unknown fields, such as database timestamps', () => {
   const cat = normalizeCat({ ...mochi, updatedAt: { seconds: 1 }, isAdmin: true });
-  assert.deepEqual(Object.keys(cat).sort(), ['birthDate', 'id', 'name', 'notes', 'outdoor', 'records', 'sex']);
+  assert.deepEqual(Object.keys(cat).sort(), ['birthDate', 'coat', 'id', 'name', 'notes', 'outdoor', 'records', 'sex']);
+});
+
+test('coat colour is kept when known and cleared otherwise', () => {
+  assert.equal(normalizeCat({ ...mochi, coat: 'calico' }).coat, 'calico');
+  assert.equal(normalizeCat({ ...mochi, coat: 'rainbow' }).coat, '');
+  assert.equal(normalizeCat(mochi).coat, '');
 });
 
 test('ids that are unsafe as database paths are replaced', () => {

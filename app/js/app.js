@@ -1,21 +1,30 @@
-import { TYPES, TYPE_INFO, upcoming, dueStatus, doseLabels, dueList, mostUrgent } from './schedule.js';
-import { todayISO, formatDate, ageText, isValidDate } from './dates.js';
-import { exportBackup, parseBackup, newId } from './store.js';
+import { TYPES, TYPE_INFO, nextDue, dueStatus, doseLabels } from './schedule.js';
+import { catSchedule } from './calendar-plan.js';
+import { todayISO, formatDate, ageText, isValidDate, daysBetween } from './dates.js';
+import { COATS, exportBackup, parseBackup, newId } from './store.js';
+import { catFace, coatFor, COAT_NAMES, icon, paw } from './art.js';
 import * as cloud from './cloud.js';
+import * as calendar from './calendar.js';
 
 const state = {
-  authReady: false, // has Firebase told us whether someone is signed in?
+  authReady: false, // has Firebase said whether someone is signed in?
   user: null,
   cats: [],
   catsLoaded: false,
+  catsFromServer: false, // true once the server has confirmed the list; only then is it safe to sync the calendar
   loadError: '',
+  settings: { calendarId: '', calendarEmail: '' },
   authMode: 'signin', // or 'signup'
+  cal: { status: 'idle', message: '', lastSynced: 0 }, // status: idle | syncing | error
 };
-let stopWatchingCats = null;
+const closedDetails = new Set();
+let unsubscribers = [];
 
 const app = document.getElementById('app');
 const accountLink = document.getElementById('account-link');
 const toast = document.getElementById('toast');
+const toastText = toast.querySelector('.toast-text');
+const toastButton = toast.querySelector('.toast-action');
 const catDialog = document.getElementById('cat-dialog');
 const catForm = document.getElementById('cat-form');
 const recordDialog = document.getElementById('record-dialog');
@@ -25,6 +34,10 @@ const importInput = document.getElementById('import-file');
 const catFields = catForm.elements;
 const recordFields = recordForm.elements;
 
+document.getElementById('coat-options').innerHTML = COATS.map(
+  (coat) => `<label class="coat"><input type="radio" name="coat" value="${coat}">${catFace(coat, { size: 44 })}<span>${COAT_NAMES[coat]}</span></label>`,
+).join('');
+
 // ---------- helpers ----------
 
 function esc(value) {
@@ -33,17 +46,10 @@ function esc(value) {
 
 const findCat = (id) => state.cats.find((cat) => cat.id === id);
 const byName = (a, b) => a.name.localeCompare(b.name);
-
-function hue(text) {
-  let h = 0;
-  for (const ch of text) h = (h * 31 + ch.codePointAt(0)) % 360;
-  return h;
-}
-
-function avatar(cat, size = '') {
-  const initial = [...cat.name][0]?.toUpperCase() ?? '?';
-  return `<span class="avatar ${size}" style="--hue:${hue(cat.name)}" aria-hidden="true">${esc(initial)}</span>`;
-}
+const byDate = (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+const catLink = (cat) => `#/cat/${encodeURIComponent(cat.id)}`;
+const timeZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+const appUrl = () => location.origin + location.pathname;
 
 function plural(n, word) {
   return `${n} ${word}${n === 1 ? '' : 's'}`;
@@ -59,29 +65,199 @@ function whenText({ status, days, catchUp }) {
   return `In ${Math.round(days / 30.44)} months`;
 }
 
-let toastTimer;
-function notify(message) {
-  toast.textContent = message;
-  toast.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (toast.hidden = true), 6000);
+function monthTitle(iso, today) {
+  if (iso.slice(0, 7) === today.slice(0, 7)) return 'This month';
+  const [y, m] = iso.split('-').map(Number);
+  return new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(Date.UTC(y, m - 1, 1));
 }
 
+function greeting() {
+  const hour = new Date().getHours();
+  return hour < 12 ? 'Good morning!' : hour < 18 ? 'Good afternoon!' : 'Good evening!';
+}
+
+let toastTimer;
+let toastCallback = null;
+function notify(message, { action = '', onAction = null } = {}) {
+  toastText.textContent = message;
+  toastButton.textContent = action;
+  toastButton.hidden = !action;
+  toastCallback = onAction;
+  toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(hideToast, action ? 7000 : 5000);
+}
+function hideToast() {
+  toast.hidden = true;
+  toastCallback = null;
+}
+toastButton.addEventListener('click', () => {
+  const callback = toastCallback;
+  hideToast();
+  callback?.();
+});
+
 // ---------- saving ----------
-// Changes show on screen straight away; Firebase saves them in the background
-// (and queues them while offline), then the live update confirms them.
+// Changes show straight away; Firebase saves them in the background (queued
+// while offline) and the live update confirms them. The calendar follows.
 
 function commitCat(cat) {
   const exists = state.cats.some((c) => c.id === cat.id);
   state.cats = exists ? state.cats.map((c) => (c.id === cat.id ? cat : c)) : [...state.cats, cat];
   render();
   cloud.saveCat(state.user.uid, cat).catch((error) => notify(`Couldn’t save ${cat.name}. ${cloud.friendlyError(error)}`));
+  scheduleSync();
 }
 
 function dropCat(cat) {
   state.cats = state.cats.filter((c) => c.id !== cat.id);
   render();
   cloud.removeCat(state.user.uid, cat.id).catch((error) => notify(`Couldn’t delete ${cat.name}. ${cloud.friendlyError(error)}`));
+  scheduleSync();
+}
+
+// ---------- Google Calendar ----------
+
+const calConnected = () => calendar.isAvailable && Boolean(state.settings.calendarId);
+let syncTimer;
+let syncing = false;
+let syncAgain = false;
+
+function setCal(status, message = '') {
+  state.cal = { ...state.cal, status, message };
+  paintCalendar();
+}
+
+/** Syncs soon, once it is safe: connected, signed in to Google, and the cat list confirmed by the server. */
+function scheduleSync(delay = 600) {
+  if (!state.user || !calConnected() || !state.catsFromServer) return;
+  if (!calendar.hasToken()) return paintCalendar();
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(runSync, delay);
+}
+
+async function runSync() {
+  if (syncing) {
+    syncAgain = true;
+    return;
+  }
+  if (!calConnected() || !calendar.hasToken() || !state.catsFromServer) return paintCalendar();
+  syncing = true;
+  setCal('syncing');
+  try {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await calendar.syncCalendar(state.settings.calendarId, state.cats, { today: todayISO(), timeZone: timeZone(), appUrl: appUrl() });
+        break;
+      } catch (error) {
+        if (error.status !== 404 || attempt > 0) throw error;
+        // The calendar was deleted in Google Calendar: make a new one and try again.
+        const calendarId = await calendar.createCalendar(timeZone());
+        state.settings = { ...state.settings, calendarId };
+        await cloud.saveSettings(state.user.uid, state.settings);
+      }
+    }
+    state.cal.lastSynced = Date.now();
+    setCal('idle');
+  } catch (error) {
+    setCal('error', calendar.friendlyCalendarError(error));
+  } finally {
+    syncing = false;
+    if (syncAgain) {
+      syncAgain = false;
+      scheduleSync(0);
+    }
+  }
+}
+
+/**
+ * Call at the start of any tap that changes the schedule. If Google's
+ * permission has run out, this asks again while the tap still counts, which
+ * is the only time browsers let the Google window open.
+ */
+function renewCalendarInTap() {
+  if (!calConnected() || calendar.hasToken()) return;
+  calendar
+    .requestAccess({ hint: state.settings.calendarEmail })
+    .then(() => {
+      setCal('idle');
+      scheduleSync(0);
+    })
+    .catch((error) => setCal(error.message ? 'error' : 'idle', calendar.friendlyCalendarError(error)));
+}
+
+async function connectCalendar() {
+  const firstTime = !state.settings.calendarId;
+  const asking = calendar.requestAccess({ consent: firstTime, hint: state.settings.calendarEmail });
+  setCal('syncing');
+  try {
+    await asking;
+    const email = (await calendar.accountEmail()) || state.settings.calendarEmail;
+    let calendarId = state.settings.calendarId;
+    if (!calendarId || !(await calendar.calendarExists(calendarId))) calendarId = await calendar.createCalendar(timeZone());
+    state.settings = { calendarId, calendarEmail: email };
+    await cloud.saveSettings(state.user.uid, state.settings);
+    await runSync();
+    if (state.cal.status === 'idle') {
+      notify(firstTime ? 'Google Calendar connected! Each dose now has a reminder there.' : 'Google Calendar is up to date.');
+    }
+  } catch (error) {
+    setCal(error.message ? 'error' : 'idle', calendar.friendlyCalendarError(error));
+  }
+}
+
+function updateCalendarNow() {
+  if (calendar.hasToken()) return runSync();
+  renewCalendarInTap();
+}
+
+async function disconnectCalendar() {
+  if (!confirm('Stop Google Calendar reminders? The “Cat Reminders” calendar and its reminders will be removed from Google Calendar.')) return;
+  const { calendarId } = state.settings;
+  try {
+    if (!calendar.hasToken()) await calendar.requestAccess({ hint: state.settings.calendarEmail });
+    await calendar.deleteCalendar(calendarId);
+  } catch {
+    notify('Couldn’t remove the calendar from Google. You can delete “Cat Reminders 🐾” in Google Calendar yourself.');
+  }
+  calendar.revokeAccess();
+  state.settings = { calendarId: '', calendarEmail: '' };
+  state.cal = { status: 'idle', message: '', lastSynced: 0 };
+  await cloud.saveSettings(state.user.uid, state.settings).catch(() => {});
+  render();
+}
+
+function calendarStatus() {
+  if (!calendar.isAvailable) return 'unavailable';
+  if (!state.settings.calendarId) return 'off';
+  if (state.cal.status === 'syncing') return 'syncing';
+  if (state.cal.status === 'error') return 'error';
+  if (!calendar.hasToken()) return 'needs-auth';
+  return state.cal.lastSynced ? 'ok' : 'syncing';
+}
+
+function calendarBanner(place) {
+  const status = calendarStatus();
+  const email = esc(state.settings.calendarEmail);
+  switch (status) {
+    case 'unavailable':
+      return '';
+    case 'off':
+      if (place === 'cat') return '';
+      return `<div class="cal">${icon('calendar', { size: 26 })}<div class="cal-text">Get reminders in Google Calendar<small>The day before and on the day each dose is due.</small></div><button class="btn small primary" data-action="cal-connect">Connect</button></div>`;
+    case 'syncing':
+      return `<div class="cal busy">${icon('sync', { size: 24 })}<div class="cal-text">Updating Google Calendar…</div></div>`;
+    case 'needs-auth':
+      return `<div class="cal problem">${icon('calendar', { size: 26 })}<div class="cal-text">Google Calendar needs updating<small>Tap Update so Google can check it’s you.</small></div><button class="btn small" data-action="cal-update">Update</button></div>`;
+    case 'error':
+      return `<div class="cal problem">${icon('calendar', { size: 26 })}<div class="cal-text">${esc(state.cal.message || 'Google Calendar didn’t update.')}</div><button class="btn small" data-action="cal-update">Try again</button></div>`;
+    default:
+      return `<div class="cal ok">${icon('check', { size: 24 })}<div class="cal-text">Reminders are in Google Calendar${email ? `<small>${email}</small>` : ''}</div></div>`;
+  }
+}
+
+function paintCalendar() {
+  document.querySelectorAll('.cal-status').forEach((el) => (el.innerHTML = calendarBanner(el.dataset.place)));
 }
 
 // ---------- views: signed out ----------
@@ -92,9 +268,9 @@ function authView() {
   const signup = state.authMode === 'signup';
   return `
     <section class="card auth">
-      <img src="icons/icon.svg" alt="" width="64" height="64">
-      <h1>${signup ? 'Create your account' : 'Welcome back'}</h1>
-      <p class="muted">Keep every cat’s deworming and vaccines on time, on all your devices.</p>
+      ${catFace('ginger', { size: 92 })}
+      <h1>${signup ? 'Join the clowder!' : 'Welcome back!'}</h1>
+      <p class="muted">Deworming and vaccine reminders for every cat in your life.</p>
       <button type="button" class="btn google" data-action="google">${GOOGLE_ICON}<span>Continue with Google</span></button>
       <div class="divider"><span>or with email</span></div>
       <form id="auth-form" novalidate>
@@ -123,17 +299,18 @@ function authView() {
 function setupView() {
   return `
     <section class="card empty">
-      <img src="icons/icon.svg" alt="" width="64" height="64">
+      ${catFace('ginger', { size: 80, sleepy: true })}
       <h1>Almost ready</h1>
       <p class="muted">This app isn’t connected to its Firebase project yet, so nobody can sign in. The setup steps are in the project’s README.</p>
     </section>`;
 }
 
-const loadingView = () => '<p class="loading muted" role="status">Loading…</p>';
+const loadingView = () => `<div class="loading" role="status">${catFace('ginger', { size: 64 })}<span>Loading…</span></div>`;
 
 function loadErrorView() {
   return `
     <section class="card empty">
+      ${catFace('gray', { size: 80, sleepy: true })}
       <h1>Couldn’t load your cats</h1>
       <p class="muted">${esc(state.loadError)}</p>
       <button class="btn primary" data-action="reload">Try again</button>
@@ -142,172 +319,200 @@ function loadErrorView() {
 
 // ---------- views: signed in ----------
 
-function dueRow(item) {
+function taskRow(item, today, { showCat = false } = {}) {
+  const status = dueStatus(item.date, today);
   const info = TYPE_INFO[item.type];
+  const locked = !item.isNext;
+  const cat = findCat(item.catId);
+  const what = `${info.name}${item.label ? ` (${item.label})` : ''}`;
+  const meta = [
+    `<span class="when">${esc(whenText({ ...status, catchUp: item.catchUp }))}</span>`,
+    `<span>${item.catchUp ? 'Not recorded yet' : esc(formatDate(item.date))}</span>`,
+    item.fromVet ? '<span class="badge">Vet’s date</span>' : '',
+  ].filter(Boolean);
   return `
-    <li class="due-item" data-status="${item.status}">
-      <span class="dot" aria-hidden="true"></span>
-      <div class="due-text">
-        <div class="due-title">
-          <a href="#/cat/${encodeURIComponent(item.cat.id)}">${esc(item.cat.name)}</a>
-          <span>${esc(info.name)}</span>
-        </div>
-        <div class="due-meta">${[
-          `<span class="when">${esc(whenText(item))}</span>`,
-          `<span>${item.catchUp ? 'Not recorded yet' : esc(formatDate(item.date))}</span>`,
-          item.label && `<span>${esc(item.label)}</span>`,
-        ].filter(Boolean).join(' · ')}</div>
+    <li class="task${locked ? ' locked' : ''}" data-status="${status.status}">
+      <label class="tick"${locked ? ' data-action="locked" title="Unlocks after the one before it is ticked off"' : ' title="Tick when done"'}>
+        <input type="checkbox" data-action="tick" data-cat="${esc(item.catId)}" data-type="${item.type}"${locked ? ' disabled' : ''} aria-label="${esc(`${item.catName}: ${what} is done`)}">
+        <span class="tick-box">${paw(18)}</span>
+      </label>
+      <span class="type-badge type-${item.type}">${icon(item.type, { size: 22 })}</span>
+      <div class="task-text">
+        ${showCat && cat ? `<a class="who" href="${catLink(cat)}">${catFace(coatFor(cat), { size: 20 })}${esc(cat.name)}</a>` : ''}
+        <div class="task-title"><span>${esc(info.name)}</span>${item.label ? `<span class="dose">${esc(item.label)}</span>` : ''}</div>
+        <div class="task-meta">${meta.join(' · ')}</div>
       </div>
-      <button class="btn small" data-action="log" data-cat="${esc(item.cat.id)}" data-type="${item.type}">Done</button>
     </li>`;
 }
 
-function catCard(cat, today) {
-  const next = mostUrgent(cat, today);
+function doneRow(cat, { record, label, type }) {
+  const info = TYPE_INFO[type];
+  const extra = [
+    record.product && esc(record.product),
+    record.notes && esc(record.notes),
+    record.nextDue && `Vet’s next date: ${esc(formatDate(record.nextDue))}`,
+  ].filter(Boolean);
   return `
-    <li>
-      <a class="cat-card" href="#/cat/${encodeURIComponent(cat.id)}">
-        ${avatar(cat)}
-        <span class="cat-card-body">
-          <span class="cat-name">${esc(cat.name)}</span>
-          <span class="muted">${esc(ageText(cat.birthDate, today))}</span>
-        </span>
-        <span class="cat-next" data-status="${next.status}">
-          <span class="chip">${esc(whenText(next))}</span>
-          <span class="muted small">${esc(TYPE_INFO[next.type].name)}</span>
-        </span>
-      </a>
+    <li class="task done">
+      <label class="tick" title="Untick">
+        <input type="checkbox" checked data-action="untick" data-cat="${esc(cat.id)}" data-record="${esc(record.id)}" aria-label="${esc(`${info.name} on ${formatDate(record.date)} is done. Untick to undo`)}">
+        <span class="tick-box">${paw(18)}</span>
+      </label>
+      <span class="type-badge type-${type}">${icon(type, { size: 22 })}</span>
+      <div class="task-text">
+        <div class="task-title"><span>${esc(info.name)}</span>${label ? `<span class="dose">${esc(label)}</span>` : ''}</div>
+        <div class="task-meta"><span>Done ${esc(formatDate(record.date))}</span>${extra.length ? ` · ${extra.join(' · ')}` : ''}</div>
+      </div>
+      <button class="btn small ghost" data-action="edit-record" data-cat="${esc(cat.id)}" data-record="${esc(record.id)}" aria-label="Edit ${esc(info.name)} from ${esc(formatDate(record.date))}">Edit</button>
     </li>`;
 }
 
 const disclaimer = () =>
-  '<p class="disclaimer">Default schedules follow common vet guidelines. Your vet knows your cat best, so enter the dates they give you when you have them.</p>';
+  '<p class="disclaimer">Schedules follow common vet guidelines. Your vet knows your cat best, so use the dates they give you when you have them.</p>';
 
 function homeView(today) {
   if (state.cats.length === 0) {
     return `
       <section class="empty card">
-        <img src="icons/icon.svg" alt="" width="72" height="72">
-        <h1>Keep every cat’s shots on time</h1>
-        <p class="muted">Add your cats and the app works out when deworming, the 4-in-1 vaccine and the anti-rabies vaccine are due.</p>
-        <button class="btn primary" data-action="add-cat">Add your first cat</button>
+        ${catFace('ginger', { size: 110 })}
+        <h1>Meow! Who’s your cat?</h1>
+        <p class="muted">Add your cat’s name and birthday, and their whole deworming and vaccine schedule appears. Tick each one off as it’s done.</p>
+        <button class="btn primary" data-action="add-cat">${icon('plus')} Add your first cat</button>
       </section>
+      <div class="cal-status" data-place="home">${calendarBanner('home')}</div>
       ${disclaimer()}`;
   }
 
   const cats = [...state.cats].sort(byName);
-  const due = dueList(cats, today, 30);
+  const todo = cats
+    .flatMap((cat) => catSchedule(cat, today).filter((item) => item.isNext && daysBetween(today, item.date) <= 30))
+    .sort((a, b) => byDate(a, b) || a.catName.localeCompare(b.catName));
+  const overdue = todo.filter((item) => item.date < today).length;
+  const line = todo.length
+    ? `${plural(todo.length, 'thing')} to do in the next 30 days${overdue ? `, ${overdue} overdue` : ''}.`
+    : 'Everyone is up to date. Time for a nap.';
+
   return `
+    <section class="hello">
+      <h1>${greeting()}</h1>
+      <p>${line}</p>
+    </section>
+    <div class="cal-status" data-place="home">${calendarBanner('home')}</div>
     <section>
-      <div class="section-head">
-        <h2>Coming up</h2>
-        <span class="muted small">Overdue and next 30 days</span>
-      </div>
-      ${due.length
-        ? `<ul class="due-list card">${due.map(dueRow).join('')}</ul>`
-        : '<p class="card muted">Nothing due in the next 30 days.</p>'}
+      <div class="section-head"><h2>To do</h2><span class="muted small">Next 30 days</span></div>
+      ${todo.length
+        ? `<ul class="checklist card">${todo.map((item) => taskRow(item, today, { showCat: true })).join('')}</ul>`
+        : `<div class="card caught-up">${catFace('cream', { size: 56, sleepy: true })}<div><strong>All caught up!</strong><span class="muted">Nothing due in the next 30 days.</span></div></div>`}
     </section>
     <section>
-      <div class="section-head">
-        <h2>Your cats <span class="count">${cats.length}</span></h2>
-        <button class="btn small" data-action="add-cat">Add cat</button>
-      </div>
-      <ul class="cat-list">${cats.map((cat) => catCard(cat, today)).join('')}</ul>
+      <div class="section-head"><h2>Your cats</h2></div>
+      <ul class="cat-grid">
+        ${cats.map((cat) => catCard(cat, today)).join('')}
+        <li><button class="cat-card add-tile" data-action="add-cat"><span class="plus">${icon('plus', { size: 28 })}</span>Add a cat</button></li>
+      </ul>
     </section>
     ${disclaimer()}`;
 }
 
-function scheduleCard(cat, type, today) {
-  const info = TYPE_INFO[type];
-  const plan = upcoming(cat, type, today);
-  const next = { ...plan[0], ...dueStatus(plan[0].date, today) };
-  const later = plan.slice(1);
-  const history = doseLabels(cat, type).reverse();
-
+function catCard(cat, today) {
+  const [next] = catSchedule(cat, today);
+  const status = dueStatus(next.date, today);
   return `
-    <article class="card schedule" data-status="${next.status}">
-      <header class="schedule-head">
-        <div>
-          <h3>${esc(info.name)}</h3>
-          <p class="muted small">${esc(info.about)}</p>
-        </div>
-        <span class="chip">${esc(whenText(next))}</span>
-      </header>
-
-      <div class="next">
-        <div>
-          <div class="next-label">Next${next.label ? ` · ${esc(next.label)}` : ''}</div>
-          <div class="next-date">${next.catchUp ? 'As soon as you can' : esc(formatDate(next.date))}</div>
-          <div class="muted small">${esc(next.reason)}${next.fromVet ? ' <span class="badge">Vet</span>' : ''}</div>
-        </div>
-        <button class="btn primary" data-action="log" data-cat="${esc(cat.id)}" data-type="${type}">Mark as done</button>
-      </div>
-
-      ${later.length ? `
-        <details class="plan">
-          <summary>Schedule after that (${later.length})</summary>
-          <ol class="timeline">
-            ${later.map((item) => `<li><span>${esc(formatDate(item.date))}</span><span class="muted">${esc(item.label ?? '')}</span></li>`).join('')}
-          </ol>
-          <p class="muted small">Assumes each one is done on its due date. Dates move when you record what was given.</p>
-        </details>` : ''}
-
-      <details class="history" open>
-        <summary>Already given (${history.length})</summary>
-        ${history.length ? `
-          <ul class="records">
-            ${history.map(({ record, label }) => `
-              <li>
-                <div>
-                  <div>${esc(formatDate(record.date))}${label ? ` <span class="muted">· ${esc(label)}</span>` : ''}</div>
-                  ${record.product || record.notes || record.nextDue ? `<div class="muted small">${[
-                    record.product && esc(record.product),
-                    record.notes && esc(record.notes),
-                    record.nextDue && `Vet’s next date: ${esc(formatDate(record.nextDue))}`,
-                  ].filter(Boolean).join(' · ')}</div>` : ''}
-                </div>
-                <button class="btn small ghost" data-action="edit-record" data-cat="${esc(cat.id)}" data-record="${esc(record.id)}" aria-label="Edit record from ${esc(formatDate(record.date))}">Edit</button>
-              </li>`).join('')}
-          </ul>` : '<p class="muted small">Nothing recorded yet.</p>'}
-      </details>
-    </article>`;
+    <li>
+      <a class="cat-card" href="${catLink(cat)}">
+        ${catFace(coatFor(cat), { size: 72 })}
+        <span class="cat-name">${esc(cat.name)}</span>
+        <span class="muted small">${esc(ageText(cat.birthDate, today))}</span>
+        <span class="chip" data-status="${status.status}">${esc(whenText({ ...status, catchUp: next.catchUp }))}</span>
+        <span class="muted small">${esc(TYPE_INFO[next.type].name)}</span>
+      </a>
+    </li>`;
 }
 
 function catView(cat, today) {
+  const schedule = catSchedule(cat, today);
+  const done = TYPES.flatMap((type) => doseLabels(cat, type).map((entry) => ({ ...entry, type }))).sort(
+    (a, b) => byDate(b.record, a.record),
+  );
+  const groups = [];
+  for (const item of schedule) {
+    const title = item.date < today ? 'Overdue' : monthTitle(item.date, today);
+    if (groups.at(-1)?.title !== title) groups.push({ title, items: [] });
+    groups.at(-1).items.push(item);
+  }
+  const overdue = schedule.filter((item) => item.date < today).length;
+  const next = schedule[0];
+  const summary = overdue
+    ? `<p class="summary" style="color: var(--overdue)">${plural(overdue, 'thing')} overdue. Tick each one off once it’s done.</p>`
+    : `<p class="summary">Next up: ${esc(TYPE_INFO[next.type].name.toLowerCase())}, ${esc(whenText({ ...dueStatus(next.date, today), catchUp: next.catchUp }).toLowerCase())}.</p>`;
   const facts = [
     ageText(cat.birthDate, today),
     `Born ${formatDate(cat.birthDate)}`,
-    cat.sex === 'female' ? 'Female' : cat.sex === 'male' ? 'Male' : '',
+    cat.sex === 'female' ? 'Girl' : cat.sex === 'male' ? 'Boy' : '',
     cat.outdoor ? 'Goes outside' : 'Indoor',
   ].filter(Boolean);
-  const noRecords = cat.records.length === 0;
+  const doneKey = `done-${cat.id}`;
 
   return `
-    <a href="#/" class="back">← All cats</a>
-    <section class="card cat-header">
-      ${avatar(cat, 'large')}
-      <div class="cat-header-body">
-        <h1>${esc(cat.name)}</h1>
-        <p class="muted">${facts.map(esc).join(' · ')}</p>
-        ${cat.notes ? `<p class="notes">${esc(cat.notes)}</p>` : ''}
-      </div>
-      <button class="btn small ghost" data-action="edit-cat" data-cat="${esc(cat.id)}">Edit</button>
+    <a href="#/" class="back">${icon('back')} All cats</a>
+    <section class="card cat-hero">
+      <button class="btn small ghost edit" data-action="edit-cat" data-cat="${esc(cat.id)}">Edit</button>
+      ${catFace(coatFor(cat), { size: 110, label: `${cat.name}’s picture` })}
+      <h1>${esc(cat.name)}</h1>
+      <div class="facts">${facts.map((f) => `<span>${esc(f)}</span>`).join('')}</div>
+      ${cat.notes ? `<p class="notes">${esc(cat.notes)}</p>` : ''}
+      ${summary}
     </section>
+    <div class="cal-status" data-place="cat">${calendarBanner('cat')}</div>
 
-    ${noRecords ? `
+    ${cat.records.length === 0 ? `
       <section class="card tip">
-        <p><strong>Already had shots or deworming?</strong> Add them from the vaccine card so ${esc(cat.name)}’s schedule is right.</p>
-        <button class="btn small" data-action="log" data-cat="${esc(cat.id)}">Add past record</button>
+        <p><strong>Already had some shots or deworming?</strong> Add them from the vaccine card so ${esc(cat.name)}’s schedule starts in the right place.</p>
+        <button class="btn small" data-action="log" data-cat="${esc(cat.id)}">Add a past dose</button>
       </section>` : ''}
 
-    <div class="section-head">
-      <h2>Schedule</h2>
-      <button class="btn small" data-action="log" data-cat="${esc(cat.id)}">Add record</button>
-    </div>
-    ${TYPES.map((type) => scheduleCard(cat, type, today)).join('')}
+    <section>
+      <div class="section-head">
+        <h2>Schedule</h2>
+        ${cat.records.length ? `<button class="btn small" data-action="log" data-cat="${esc(cat.id)}">Add a past dose</button>` : ''}
+      </div>
+      <p class="muted small">Tick each one off when it’s done. The next one unlocks after that.</p>
+      ${groups.map((group) => `
+        <h3 class="month${group.title === 'Overdue' ? ' overdue' : ''}">${esc(group.title)}</h3>
+        <ul class="checklist card">${group.items.map((item) => taskRow(item, today)).join('')}</ul>`).join('')}
+    </section>
+
+    <section>
+      <details class="done-list" data-keep="${esc(doneKey)}"${closedDetails.has(doneKey) ? '' : ' open'}>
+        <summary>Done (${done.length})</summary>
+        ${done.length
+          ? `<ul class="checklist card">${done.map((entry) => doneRow(cat, entry)).join('')}</ul>`
+          : '<p class="muted">Nothing ticked off yet.</p>'}
+      </details>
+    </section>
 
     <div class="danger-zone">
       <button class="btn danger-ghost" data-action="delete-cat" data-cat="${esc(cat.id)}">Delete ${esc(cat.name)}</button>
+    </div>`;
+}
+
+function calendarSection() {
+  if (!calendar.isAvailable) {
+    return '<p class="muted">Google Calendar reminders aren’t set up for this app yet.</p>';
+  }
+  if (!state.settings.calendarId) {
+    return `
+      <p class="muted">Get a reminder in Google Calendar the day before and on the day each dose is due. Ticking a dose off here removes its reminder.</p>
+      <p class="muted small">The app gets its own “Cat Reminders 🐾” calendar and can’t see your other events.</p>
+      <div class="row"><button class="btn primary" data-action="cal-connect">${icon('calendar')} Connect Google Calendar</button></div>`;
+  }
+  return `
+    <p class="muted">Reminders go to the “Cat Reminders 🐾” calendar${state.settings.calendarEmail ? ` in <strong class="email">${esc(state.settings.calendarEmail)}</strong>` : ''}.</p>
+    <div class="cal-status" data-place="account">${calendarBanner('account')}</div>
+    <p class="muted small">Not seeing it on your phone? In the Google Calendar app, open Settings and turn on “Cat Reminders 🐾”.</p>
+    <div class="row">
+      <button class="btn" data-action="cal-update">${icon('sync')} Update now</button>
+      <button class="btn danger-ghost" data-action="cal-disconnect">Disconnect</button>
     </div>`;
 }
 
@@ -315,11 +520,15 @@ function accountView() {
   const { user } = state;
   const withGoogle = user.providerData.some((p) => p.providerId === 'google.com');
   return `
-    <a href="#/" class="back">← All cats</a>
+    <a href="#/" class="back">${icon('back')} All cats</a>
     <section class="card account">
       <h1>Account</h1>
       <p class="muted">Signed in as <strong class="email">${esc(user.email ?? 'unknown')}</strong>${withGoogle ? ' with Google' : ''}.</p>
       <div class="row"><button class="btn" data-action="sign-out">Sign out</button></div>
+    </section>
+    <section class="card account">
+      <h2>Google Calendar</h2>
+      ${calendarSection()}
     </section>
     <section class="card backup">
       <h2>Your data</h2>
@@ -378,6 +587,48 @@ function show(html, title) {
   document.title = title;
 }
 
+// ---------- ticking ----------
+
+// A quick double tap shouldn't tick two doses: the next one appears right after a tick.
+let lastTickAt = 0;
+
+function tick(catId, type) {
+  const cat = findCat(catId);
+  if (!cat) return;
+  if (Date.now() - lastTickAt < 800) return render();
+  lastTickAt = Date.now();
+  renewCalendarInTap();
+  const today = todayISO();
+  const record = { id: newId(), type, date: today, product: '', notes: '', nextDue: '' };
+  const updated = { ...cat, records: [...cat.records, record] };
+  commitCat(updated);
+  const next = nextDue(updated, type, today);
+  notify(`Purr-fect! ${TYPE_INFO[type].name} ticked off for ${cat.name}. Next one: ${formatDate(next.date)}.`, {
+    action: 'Undo',
+    onAction: () => {
+      renewCalendarInTap();
+      const latest = findCat(catId);
+      if (latest) commitCat({ ...latest, records: latest.records.filter((r) => r.id !== record.id) });
+    },
+  });
+}
+
+function untick(catId, recordId) {
+  const cat = findCat(catId);
+  const record = cat?.records.find((r) => r.id === recordId);
+  if (!record) return;
+  renewCalendarInTap();
+  commitCat({ ...cat, records: cat.records.filter((r) => r.id !== recordId) });
+  notify(`Unticked ${TYPE_INFO[record.type].name.toLowerCase()} from ${formatDate(record.date)}.`, {
+    action: 'Undo',
+    onAction: () => {
+      renewCalendarInTap();
+      const latest = findCat(catId);
+      if (latest) commitCat({ ...latest, records: [...latest.records, record] });
+    },
+  });
+}
+
 // ---------- signing in ----------
 
 function authMessage(form, { error = '', info = '' }) {
@@ -405,7 +656,6 @@ async function submitAuth(form) {
   setBusy(true);
   try {
     await (signup ? cloud.signUp(email, password) : cloud.signIn(email, password));
-    // watchUser takes it from here.
   } catch (error) {
     authMessage(form, { error: cloud.friendlyError(error) });
     setBusy(false);
@@ -420,16 +670,13 @@ async function forgotPassword() {
     form.elements.email.focus();
     return;
   }
+  const sent = `If there’s an account for ${email}, a link to reset the password is on its way. Check your inbox.`;
   setBusy(true);
   try {
     await cloud.resetPassword(email);
-    authMessage(form, { info: `If there’s an account for ${email}, a link to reset the password is on its way. Check your inbox.` });
+    authMessage(form, { info: sent });
   } catch (error) {
-    if (error?.code === 'auth/user-not-found') {
-      authMessage(form, { info: `If there’s an account for ${email}, a link to reset the password is on its way. Check your inbox.` });
-    } else {
-      authMessage(form, { error: cloud.friendlyError(error) });
-    }
+    authMessage(form, error?.code === 'auth/user-not-found' ? { info: sent } : { error: cloud.friendlyError(error) });
   } finally {
     setBusy(false);
   }
@@ -456,15 +703,22 @@ function switchAuthMode(mode) {
   (email ? form.elements.password : form.elements.email).focus();
 }
 
+async function signOut() {
+  calendar.forget();
+  await cloud.signOut();
+}
+
 async function deleteAccount() {
   const { user } = state;
   if (!confirm('Delete your account and all your cats’ records? This cannot be undone.')) return;
   if (!cloud.signedInRecently(user)) {
     alert('For your security, please sign in again, then delete your account.');
-    await cloud.signOut();
+    await signOut();
     return;
   }
   try {
+    if (calConnected() && calendar.hasToken()) await calendar.deleteCalendar(state.settings.calendarId).catch(() => {});
+    calendar.revokeAccess();
     await cloud.deleteAccount(user);
   } catch (error) {
     alert(cloud.friendlyError(error));
@@ -493,6 +747,7 @@ function openCatDialog(cat = null) {
     catFields.sex.value = cat.sex;
     catFields.outdoor.checked = cat.outdoor;
     catFields.notes.value = cat.notes;
+    if (cat.coat) catFields.coat.value = cat.coat;
   }
   catDialog.showModal();
 }
@@ -502,23 +757,33 @@ catForm.addEventListener('submit', (event) => {
   const name = catFields.name.value.trim();
   const birthDate = catFields.birthDate.value;
   if (!name) return showError(catForm, 'Please enter a name.');
-  if (!isValidDate(birthDate)) return showError(catForm, 'Please enter a birthday. An estimate is fine.');
-  if (birthDate > todayISO()) return showError(catForm, 'The birthday cannot be in the future.');
+  if (!isValidDate(birthDate)) return showError(catForm, 'Please enter a birthday. A guess is fine.');
+  if (birthDate > todayISO()) return showError(catForm, 'The birthday can’t be in the future.');
 
-  const fields = { name, birthDate, sex: catFields.sex.value, outdoor: catFields.outdoor.checked, notes: catFields.notes.value.trim() };
+  const fields = {
+    name,
+    birthDate,
+    sex: catFields.sex.value,
+    outdoor: catFields.outdoor.checked,
+    coat: catFields.coat.value,
+    notes: catFields.notes.value.trim(),
+  };
   const existing = editingCatId && findCat(editingCatId);
   if (existing) {
     const firstRecord = existing.records.map((r) => r.date).sort()[0];
     if (firstRecord && birthDate > firstRecord) {
-      return showError(catForm, `The birthday cannot be after the first record (${formatDate(firstRecord)}).`);
+      return showError(catForm, `The birthday can’t be after the first dose (${formatDate(firstRecord)}).`);
     }
+    renewCalendarInTap();
     catDialog.close();
     commitCat({ ...existing, ...fields });
   } else {
+    renewCalendarInTap();
     const cat = { id: newId(), ...fields, records: [] };
     catDialog.close();
     commitCat(cat);
-    location.hash = `#/cat/${encodeURIComponent(cat.id)}`;
+    location.hash = catLink(cat);
+    notify(`${cat.name}’s schedule is ready! Tick each one off as it’s done.`);
   }
 });
 
@@ -528,7 +793,7 @@ function openRecordDialog(cat, { type = 'deworm', record = null } = {}) {
   editing = { catId: cat.id, recordId: record?.id ?? null };
   recordForm.reset();
   showError(recordForm, '');
-  recordDialog.querySelector('#record-dialog-title').textContent = record ? 'Edit record' : 'Add a record';
+  recordDialog.querySelector('#record-dialog-title').textContent = record ? 'Edit dose' : 'Add a past dose';
   recordDialog.querySelector('#record-dialog-cat').textContent = cat.name;
   recordFields.date.min = cat.birthDate;
   recordFields.date.max = todayISO();
@@ -553,8 +818,8 @@ recordForm.addEventListener('submit', (event) => {
   const date = recordFields.date.value;
   const nextDueDate = recordFields.nextDue.value;
   if (!isValidDate(date)) return showError(recordForm, 'Please enter the date it was given.');
-  if (date > todayISO()) return showError(recordForm, 'The date given cannot be in the future.');
-  if (date < cat.birthDate) return showError(recordForm, `The date cannot be before ${cat.name}’s birthday.`);
+  if (date > todayISO()) return showError(recordForm, 'The date given can’t be in the future.');
+  if (date < cat.birthDate) return showError(recordForm, `The date can’t be before ${cat.name}’s birthday.`);
   if (nextDueDate && nextDueDate <= date) return showError(recordForm, 'The vet’s next date must be after the date given.');
 
   const fields = {
@@ -567,6 +832,7 @@ recordForm.addEventListener('submit', (event) => {
   const records = editing.recordId
     ? cat.records.map((r) => (r.id === editing.recordId ? { ...r, ...fields } : r))
     : [...cat.records, { id: newId(), ...fields }];
+  renewCalendarInTap();
   recordDialog.close();
   commitCat({ ...cat, records });
 });
@@ -575,7 +841,8 @@ recordDialog.querySelector('#record-delete').addEventListener('click', () => {
   const cat = findCat(editing.catId);
   const record = cat?.records.find((r) => r.id === editing.recordId);
   if (!record) return;
-  if (!confirm(`Delete the ${TYPE_INFO[record.type].name.toLowerCase()} record from ${formatDate(record.date)}?`)) return;
+  if (!confirm(`Delete the ${TYPE_INFO[record.type].name.toLowerCase()} from ${formatDate(record.date)}?`)) return;
+  renewCalendarInTap();
   recordDialog.close();
   commitCat({ ...cat, records: cat.records.filter((r) => r.id !== record.id) });
 });
@@ -608,7 +875,7 @@ importInput.addEventListener('change', async () => {
     const cats = parseBackup(await file.text());
     if (cats.length === 0) return alert('This backup has no cats in it.');
     if (!confirm(`Add ${plural(cats.length, 'cat')} from this backup to your account? Cats imported before are updated, not doubled.`)) return;
-    cats.forEach(commitCat);
+    cats.forEach((cat) => commitCat(cat));
     location.hash = '#/';
     notify(`Imported ${plural(cats.length, 'cat')}.`);
   } catch (error) {
@@ -616,37 +883,61 @@ importInput.addEventListener('change', async () => {
   }
 });
 
-// ---------- actions ----------
+// ---------- events ----------
 
 document.addEventListener('click', (event) => {
-  const button = event.target.closest('[data-action]');
-  if (!button) return;
-  const { action } = button.dataset;
-  const cat = button.dataset.cat ? findCat(button.dataset.cat) : null;
+  const target = event.target.closest('[data-action]');
+  if (!target) return;
+  const { action } = target.dataset;
+  const cat = target.dataset.cat ? findCat(target.dataset.cat) : null;
 
   switch (action) {
     case 'google': return googleSignIn();
     case 'forgot': return forgotPassword();
-    case 'auth-mode': return switchAuthMode(button.dataset.mode);
+    case 'auth-mode': return switchAuthMode(target.dataset.mode);
     case 'reload': return location.reload();
-    case 'sign-out': return cloud.signOut();
+    case 'sign-out': return signOut();
     case 'delete-account': return deleteAccount();
     case 'add-cat': return openCatDialog();
     case 'export': return downloadCopy();
     case 'import': return importInput.click();
+    case 'cal-connect': return connectCalendar();
+    case 'cal-update': return updateCalendarNow();
+    case 'cal-disconnect': return disconnectCalendar();
+    case 'locked': return notify('That one unlocks once the one before it is ticked off.');
   }
   if (!cat) return;
   if (action === 'edit-cat') openCatDialog(cat);
-  else if (action === 'log') openRecordDialog(cat, { type: button.dataset.type });
+  else if (action === 'log') openRecordDialog(cat, { type: target.dataset.type });
   else if (action === 'edit-record') {
-    const record = cat.records.find((r) => r.id === button.dataset.record);
+    const record = cat.records.find((r) => r.id === target.dataset.record);
     if (record) openRecordDialog(cat, { record });
   } else if (action === 'delete-cat') {
     if (!confirm(`Delete ${cat.name} and all of ${cat.name}’s records? This cannot be undone.`)) return;
+    renewCalendarInTap();
     location.hash = '#/';
     dropCat(cat);
   }
 });
+
+document.addEventListener('change', (event) => {
+  const box = event.target.closest('input[data-action]');
+  if (!box) return;
+  if (box.dataset.action === 'tick' && box.checked) tick(box.dataset.cat, box.dataset.type);
+  if (box.dataset.action === 'untick' && !box.checked) untick(box.dataset.cat, box.dataset.record);
+});
+
+// <details> remember whether they were closed across re-renders.
+document.addEventListener(
+  'toggle',
+  (event) => {
+    const key = event.target.dataset?.keep;
+    if (!key) return;
+    if (event.target.open) closedDetails.delete(key);
+    else closedDetails.add(key);
+  },
+  true,
+);
 
 document.addEventListener('submit', (event) => {
   if (event.target.id === 'auth-form') {
@@ -660,9 +951,12 @@ window.addEventListener('hashchange', () => {
   window.scrollTo(0, 0);
 });
 
-// Refresh "today" when the app comes back to the foreground.
+// Refresh "today" (and the calendar) when the app comes back to the foreground.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && state.user) render();
+  if (document.visibilityState === 'visible' && state.user) {
+    render();
+    scheduleSync(0);
+  }
 });
 
 // ---------- start ----------
@@ -671,21 +965,51 @@ render();
 
 if (cloud.isConfigured) {
   cloud.watchUser((user) => {
-    stopWatchingCats?.();
-    stopWatchingCats = null;
-    Object.assign(state, { authReady: true, user, cats: [], catsLoaded: false, loadError: '' });
+    unsubscribers.forEach((stop) => stop());
+    unsubscribers = [];
+    Object.assign(state, {
+      authReady: true,
+      user,
+      cats: [],
+      catsLoaded: false,
+      catsFromServer: false,
+      loadError: '',
+      settings: { calendarId: '', calendarEmail: '' },
+      cal: { status: 'idle', message: '', lastSynced: 0 },
+    });
     if (user) {
-      stopWatchingCats = cloud.watchCats(
-        user.uid,
-        (cats) => {
-          state.cats = cats;
-          state.catsLoaded = true;
-          render();
-        },
-        (error) => {
-          state.loadError = cloud.friendlyError(error);
-          render();
-        },
+      calendar.useAccount(user.uid);
+      calendar.preload().catch(() => {});
+      const onError = (error) => {
+        state.loadError = cloud.friendlyError(error);
+        render();
+      };
+      unsubscribers.push(
+        cloud.watchCats(
+          user.uid,
+          (cats, { fromServer }) => {
+            state.cats = cats;
+            state.catsLoaded = true;
+            const firstServerList = fromServer && !state.catsFromServer;
+            if (fromServer) state.catsFromServer = true;
+            render();
+            if (firstServerList) scheduleSync(0);
+          },
+          onError,
+        ),
+        cloud.watchSettings(
+          user.uid,
+          (settings) => {
+            const changed = settings.calendarId !== state.settings.calendarId;
+            state.settings = settings;
+            if (changed) {
+              paintCalendar();
+              scheduleSync(0);
+              if (currentRoute().view === 'account') render();
+            }
+          },
+          () => {},
+        ),
       );
     } else {
       catDialog.close();

@@ -1,14 +1,12 @@
-# Cat Reminders
+# Cat Reminders 🐾
 
-A phone-friendly web app that keeps track of deworming and vaccines for your cats.
+A friendly, phone-first web app that keeps every cat's deworming and vaccines on time.
 
-- Anyone can create an account with an email and password, or with their Google account.
-- Each account sees only its own cats. Cats are saved to the account, so they show up on every phone or computer you sign in on, and changes sync straight away.
-- Add as many cats as you like. Each cat has its own schedule and its own list of what has already been given.
-- The app works out when the next **deworming**, **4-in-1 vaccine** and **anti-rabies vaccine** are due from the cat's birthday and its records.
-- The home screen shows everything overdue or due in the next 30 days, across all your cats.
-- If your vet writes a next date on the vaccine card, enter it with the record and the app uses that date instead.
-- Works offline (changes sync when you're back online) and can be added to your phone's home screen.
+- **Accounts:** anyone can sign up with an email and password or a Google account. Each account sees only its own cats, and changes sync to every device you sign in on.
+- **A full schedule from a birthday:** add a cat's name and birthday and the app lays out every upcoming **deworming**, **4-in-1 vaccine** and **anti-rabies vaccine** for the next year, grouped by month.
+- **Tick it off:** tick each dose when it's done. The next one unlocks, later dates adjust, and there's an Undo. Past doses from the vaccine card can be added too, with the vet's next date if they gave one.
+- **Google Calendar reminders:** connect Google Calendar once and every scheduled dose gets an event with a reminder the day before and on the day (9 am). Ticking a dose off removes its reminder, so you're only nagged about what isn't done.
+- **Cat-face avatars** in eight coat colours, and it works offline and installs to your home screen.
 
 ## Default schedules
 
@@ -22,46 +20,66 @@ These follow common vet guidelines. Your vet may adjust them for your cat.
 
 If a cat has nothing recorded and is already past the usual age for a first dose (for example, an adult you just adopted), the app shows it as due now.
 
+## How Google Calendar reminders work
+
+- The app asks Google for permission to **create and manage its own calendars only** (`calendar.app.created`). It makes a calendar called “Cat Reminders 🐾” and can't see or change any other events.
+- Each scheduled dose for the next 12 months becomes a 9:00–9:30 event in that calendar, with pop-up reminders the day before and at the time.
+- The app keeps the calendar in step whenever you change something: ticking a dose deletes its event, moves later ones if needed, and adds the next. Deleting a cat removes its events.
+- Google's permission lasts about an hour. When it runs out, the next tap that changes the schedule asks Google again (usually a quick flash of a Google window), or the app shows an **Update** button.
+- **Disconnect** (Account page) deletes the “Cat Reminders 🐾” calendar.
+- Until Google reviews the app, people connecting their calendar see a “Google hasn't verified this app” screen (tap **Advanced**, then continue), and at most 100 people can connect. Getting verified needs a privacy policy page and Google's review.
+
 ## Setting up Firebase (one time)
 
 Accounts and cats are stored in [Firebase](https://firebase.google.com), Google's app platform. The free plan is plenty for this app.
 
-1. **Create a project.** Go to the [Firebase console](https://console.firebase.google.com), click **Create a project**, give it a name (for example `cat-reminders`) and finish. Google Analytics isn't needed.
-2. **Register the web app.** On the project's home page, click the **Web** icon (`</>`), give it a nickname, and click **Register app** (leave Firebase Hosting unticked). Copy the `firebaseConfig = { … }` block it shows and paste it into [`app/js/firebase-config.js`](app/js/firebase-config.js) in place of `null`. These values are not secret.
-3. **Turn on sign-in.** Go to **Build → Authentication → Get started**. Under **Sign-in method**, enable **Email/Password**, then add **Google** and enable it (pick a support email).
-4. **Allow the website.** Still in Authentication, open **Settings → Authorized domains**, click **Add domain**, and add `creativetstrategist-mark.github.io`.
-5. **Create the database.** Go to **Build → Firestore Database → Create database**. Pick a location near you (it can't be changed later) and start in **production mode**.
-6. **Protect the data.** In Firestore, open the **Rules** tab, replace everything with the contents of [`firestore.rules`](firestore.rules), and click **Publish**. These rules are what stop one account from seeing another's cats.
+1. **Create a project** in the [Firebase console](https://console.firebase.google.com). Google Analytics isn't needed.
+2. **Register a web app** (the `</>` icon) and paste its `firebaseConfig` into [`app/js/firebase-config.js`](app/js/firebase-config.js). These values are not secret.
+3. **Turn on sign-in:** Security → Authentication → Sign-in method: enable **Email/Password** and **Google**. Under **Settings → Authorized domains**, add `creativetstrategist-mark.github.io`.
+4. **Create the database:** Databases & Storage → Firestore → Create database, in production mode.
+5. **Publish the rules:** in Firestore's **Rules** tab, replace everything with [`firestore.rules`](firestore.rules) and click **Publish**. Do this again whenever `firestore.rules` changes.
+
+## Setting up Google Calendar (one time)
+
+All in the [Google Cloud console](https://console.cloud.google.com) for the same project (`cat-reminders`):
+
+1. **Turn on the Calendar API:** open [Google Calendar API](https://console.cloud.google.com/apis/library/calendar-json.googleapis.com?project=cat-reminders) and click **Enable**.
+2. **Allow the website:** open [Credentials](https://console.cloud.google.com/apis/credentials?project=cat-reminders), click the OAuth client named **Web client (auto created by Google Service)**, add `https://creativetstrategist-mark.github.io` under **Authorized JavaScript origins**, and click **Save**.
+3. **Copy its Client ID** (ends in `.apps.googleusercontent.com`) into `googleCalendarClientId` in [`app/js/firebase-config.js`](app/js/firebase-config.js).
+4. **Let people in:** in [Google Auth Platform → Audience](https://console.cloud.google.com/auth/audience?project=cat-reminders), if the status is **Testing**, click **Publish app**. Otherwise only test users you list there can connect.
 
 ## Using it on your phone
 
-Once GitHub Pages is on (see below), open **https://creativetstrategist-mark.github.io/cat-reminder-app/** on your phone and create an account:
+Open **https://creativetstrategist-mark.github.io/cat-reminder-app/** and create an account, then add it to your home screen:
 
 - **iPhone (Safari):** tap Share, then **Add to Home Screen**.
 - **Android (Chrome):** tap the ⋮ menu, then **Add to Home screen** or **Install app**.
 
-## Turning on GitHub Pages
+In the Google Calendar app, make sure the “Cat Reminders 🐾” calendar is switched on (Settings) so its reminders show.
 
-1. In this repository on GitHub, go to **Settings → Pages**.
-2. Under **Build and deployment → Source**, choose **GitHub Actions**.
-3. Every change pushed to `main` is then tested and published automatically.
+## Publishing
+
+GitHub Pages is set to **GitHub Actions** (Settings → Pages). Every push to `main` runs the tests and publishes `app/`.
 
 ## For developers
 
-No build step for the app itself: plain HTML, CSS and JavaScript modules in [`app/`](app/). The Firebase SDK is bundled once into `app/vendor/firebase.js` so the app also opens offline.
+No build step for the app itself: plain HTML, CSS and JavaScript modules in [`app/`](app/). The Firebase SDK is bundled once into `app/vendor/firebase.js` and the Nunito font is in `app/fonts/`, so the app also opens offline.
 
 | File | What it does |
 |---|---|
 | `app/js/schedule.js` | The schedule rules: when each dose is due |
+| `app/js/calendar-plan.js` | Each cat's generated schedule, and which calendar events to add, move or delete |
+| `app/js/calendar.js` | Google sign-in for the calendar, and the Google Calendar API |
 | `app/js/dates.js` | Date maths on `YYYY-MM-DD` strings |
-| `app/js/cloud.js` | Accounts and saving cats with Firebase |
+| `app/js/cloud.js` | Accounts and saving with Firebase |
 | `app/js/store.js` | Checking cat data and backup files |
-| `app/js/app.js` | Screens, forms and buttons |
-| `app/js/firebase-config.js` | Which Firebase project to use |
+| `app/js/art.js` | Cat faces and icons (SVG) |
+| `app/js/app.js` | Screens, forms, ticking and calendar syncing |
+| `app/js/firebase-config.js` | Which Firebase project and Google client to use |
 | `firestore.rules` | Who can read and write what in the database |
 | `app/sw.js` | Offline support |
 
-Each account's cats are stored at `users/{user id}/cats/{cat id}`, one document per cat with its records inside.
+Data lives at `users/{user id}` (the account's calendar settings) and `users/{user id}/cats/{cat id}` (one document per cat, with its doses inside).
 
 Install the tools (Node 20 or newer; the database tests also need Java 11 or newer):
 
@@ -69,7 +87,7 @@ Install the tools (Node 20 or newer; the database tests also need Java 11 or new
 npm install
 ```
 
-Run the schedule and data tests:
+Run the schedule, calendar-planning and data tests:
 
 ```bash
 npm test
@@ -99,4 +117,4 @@ To update the Firebase SDK, change the `firebase` version in `package.json`, run
 npm run build:firebase
 ```
 
-When you change any file in `app/`, bump `CACHE` in `app/sw.js` (for example `cat-reminders-v3`) so installed copies pick up the change offline too.
+When you change any file in `app/`, bump `CACHE` in `app/sw.js` (for example `cat-reminders-v4`) so installed copies pick up the change offline too.

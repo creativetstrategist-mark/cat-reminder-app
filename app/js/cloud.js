@@ -35,7 +35,7 @@ import { normalizeCat } from './store.js';
 // For local testing only: open the app at http://localhost:…/?emulator while
 // `npm run emulators` is running to use throwaway local accounts and data.
 const isLocal = ['localhost', '127.0.0.1'].includes(location.hostname);
-const useEmulators = isLocal && new URLSearchParams(location.search).has('emulator');
+export const useEmulators = isLocal && new URLSearchParams(location.search).has('emulator');
 
 const EMULATOR_CONFIG = {
   apiKey: 'demo-api-key',
@@ -63,16 +63,21 @@ if (isConfigured) {
 }
 
 const catsOf = (uid) => collection(db, 'users', uid, 'cats');
+const settingsOf = (uid) => doc(db, 'users', uid);
 
 /** Calls back with the signed-in user, or null, now and whenever it changes. */
 export function watchUser(callback) {
   return onAuthStateChanged(auth, callback);
 }
 
-/** Calls back with the user's cats now and whenever they change, on any device. */
+/**
+ * Calls back with the user's cats now and whenever they change, on any device.
+ * `fromServer` is false while the list may only be this device's saved copy.
+ */
 export function watchCats(uid, onCats, onError) {
   return onSnapshot(
     catsOf(uid),
+    { includeMetadataChanges: true },
     (snapshot) => {
       const cats = [];
       for (const snap of snapshot.docs) {
@@ -82,7 +87,7 @@ export function watchCats(uid, onCats, onError) {
           console.warn(`Skipping unreadable cat ${snap.id}:`, error.message);
         }
       }
-      onCats(cats);
+      onCats(cats, { fromServer: !snapshot.metadata.fromCache });
     },
     onError,
   );
@@ -96,6 +101,25 @@ export function saveCat(uid, cat) {
 
 export function removeCat(uid, catId) {
   return deleteDoc(doc(catsOf(uid), catId));
+}
+
+/** Calls back with the account's settings ({} if none) now and whenever they change. */
+export function watchSettings(uid, onSettings, onError) {
+  return onSnapshot(
+    settingsOf(uid),
+    (snap) => {
+      const data = snap.data() ?? {};
+      onSettings({
+        calendarId: typeof data.calendarId === 'string' ? data.calendarId : '',
+        calendarEmail: typeof data.calendarEmail === 'string' ? data.calendarEmail : '',
+      });
+    },
+    onError,
+  );
+}
+
+export function saveSettings(uid, { calendarId = '', calendarEmail = '' }) {
+  return setDoc(settingsOf(uid), { calendarId, calendarEmail, updatedAt: serverTimestamp() });
 }
 
 export const signUp = (email, password) => createUserWithEmailAndPassword(auth, email, password);
@@ -122,11 +146,12 @@ export function signedInRecently(user, minutes = 5) {
   return Number.isFinite(last) && Date.now() - last < minutes * 60_000;
 }
 
-/** Deletes all of the user's cats, then the account itself. */
+/** Deletes all of the user's cats and settings, then the account itself. */
 export async function deleteAccount(user) {
   const snapshot = await getDocs(catsOf(user.uid));
   const batch = writeBatch(db);
   snapshot.docs.forEach((snap) => batch.delete(snap.ref));
+  batch.delete(settingsOf(user.uid));
   await batch.commit();
   await deleteUser(user);
   await signOut();

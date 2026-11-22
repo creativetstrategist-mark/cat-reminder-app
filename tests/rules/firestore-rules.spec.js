@@ -25,6 +25,7 @@ const validCat = (extra = {}) => ({
   birthDate: '2026-09-10',
   sex: 'female',
   outdoor: false,
+  coat: 'calico',
   notes: '',
   records: [{ id: 'r1', type: 'deworm', date: '2026-09-24', product: '', notes: '', nextDue: '' }],
   updatedAt: serverTimestamp(),
@@ -70,10 +71,35 @@ test('signed-out visitors cannot read or write anything', async () => {
   await assertFails(setDoc(doc(guest(), 'users/guest/cats/cat-1'), validCat()));
 });
 
-test('everything outside users/{id}/cats is closed', async () => {
-  await assertFails(setDoc(doc(alice(), 'users/alice'), { name: 'Alice' }));
+test('everything outside users/{id} and its cats is closed', async () => {
   await assertFails(setDoc(doc(alice(), 'cats/cat-1'), validCat()));
+  await assertFails(setDoc(doc(alice(), 'users/alice/other/thing'), { a: 1 }));
   await assertFails(getDocs(collection(alice(), 'users')));
+});
+
+const settings = (extra = {}) => ({ calendarId: 'abc@group.calendar.google.com', calendarEmail: 'alice@gmail.com', updatedAt: serverTimestamp(), ...extra });
+
+test('a user can save, read and clear their own calendar settings', async () => {
+  const ref = doc(alice(), 'users/alice');
+  await assertSucceeds(setDoc(ref, settings()));
+  await assertSucceeds(getDoc(ref));
+  await assertSucceeds(deleteDoc(ref));
+});
+
+test("a user cannot read or change another user's settings", async () => {
+  await env.withSecurityRulesDisabled((ctx) => setDoc(doc(ctx.firestore(), 'users/alice'), { ...settings(), updatedAt: new Date() }));
+  await assertFails(getDoc(doc(bob(), 'users/alice')));
+  await assertFails(setDoc(doc(bob(), 'users/alice'), settings()));
+  await assertFails(deleteDoc(doc(bob(), 'users/alice')));
+  await assertFails(getDoc(doc(guest(), 'users/alice')));
+});
+
+test('badly formed settings are rejected', async () => {
+  const ref = doc(alice(), 'users/alice');
+  await assertFails(setDoc(ref, settings({ isAdmin: true })));
+  await assertFails(setDoc(ref, settings({ calendarId: 42 })));
+  await assertFails(setDoc(ref, settings({ calendarId: 'x'.repeat(301) })));
+  await assertFails(setDoc(ref, settings({ updatedAt: new Date('2020-01-01') })));
 });
 
 test('badly formed cats are rejected', async () => {
@@ -85,6 +111,8 @@ test('badly formed cats are rejected', async () => {
     validCat({ birthDate: 'yesterday' }),
     validCat({ sex: 'unknown' }),
     validCat({ outdoor: 'yes' }),
+    validCat({ coat: 7 }),
+    validCat({ coat: 'x'.repeat(21) }),
     validCat({ notes: 'x'.repeat(1001) }),
     validCat({ records: 'none' }),
     validCat({ updatedAt: new Date('2020-01-01') }),

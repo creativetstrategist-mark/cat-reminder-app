@@ -9,6 +9,9 @@ export function newId() {
   return `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/** Coat colours for the cat avatar. '' means not chosen: the avatar then picks one from the name. */
+export const COATS = ['ginger', 'black', 'white', 'gray', 'brown', 'cream', 'calico', 'tabby'];
+
 const text = (value) => (typeof value === 'string' ? value.trim() : '');
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const safeId = (value) => (typeof value === 'string' && SAFE_ID.test(value) ? value : newId());
@@ -42,6 +45,7 @@ export function normalizeCat(cat, index = 0) {
     birthDate: cat.birthDate,
     sex: cat.sex === 'female' || cat.sex === 'male' ? cat.sex : '',
     outdoor: cat.outdoor === true,
+    coat: COATS.includes(cat.coat) ? cat.coat : '',
     notes: text(cat.notes),
     records: records.map((record, i) => normalizeRecord(record, name, i)),
   };
