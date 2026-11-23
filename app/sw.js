@@ -1,7 +1,7 @@
 // Lets the app open without internet. Always tries the network first so
 // updates show up straight away, and falls back to the saved copy offline.
 
-const CACHE = 'cat-reminders-v4';
+const CACHE = 'cat-reminders-v5';
 const FILES = [
   './',
   './index.html',

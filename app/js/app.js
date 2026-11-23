@@ -65,8 +65,7 @@ function whenText({ status, days, catchUp }) {
   return `In ${Math.round(days / 30.44)} months`;
 }
 
-function monthTitle(iso, today) {
-  if (iso.slice(0, 7) === today.slice(0, 7)) return 'This month';
+function monthTitle(iso) {
   const [y, m] = iso.split('-').map(Number);
   return new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(Date.UTC(y, m - 1, 1));
 }
@@ -327,7 +326,8 @@ function taskRow(item, today, { showCat = false } = {}) {
   const what = `${info.name}${item.label ? ` (${item.label})` : ''}`;
   const meta = [
     `<span class="when">${esc(whenText({ ...status, catchUp: item.catchUp }))}</span>`,
-    `<span>${item.catchUp ? 'Not recorded yet' : esc(formatDate(item.date))}</span>`,
+    `<span>${esc(formatDate(item.date))}</span>`,
+    item.catchUp ? '<span>not recorded yet</span>' : '',
     item.fromVet ? '<span class="badge">Vet’s date</span>' : '',
   ].filter(Boolean);
   return `
@@ -436,7 +436,7 @@ function catView(cat, today) {
   );
   const groups = [];
   for (const item of schedule) {
-    const title = item.date < today ? 'Overdue' : monthTitle(item.date, today);
+    const title = item.date < today ? 'Overdue' : monthTitle(item.date);
     if (groups.at(-1)?.title !== title) groups.push({ title, items: [] });
     groups.at(-1).items.push(item);
   }
