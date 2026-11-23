@@ -5,6 +5,10 @@ import { COATS, exportBackup, parseBackup, newId } from './store.js';
 import { catFace, coatFor, COAT_NAMES, icon, paw } from './art.js';
 import * as cloud from './cloud.js';
 import * as calendar from './calendar.js';
+import { photoFromFile } from './photo.js';
+import { dashboardCard, avatarRing } from './dashboard.js';
+import { earnedBadges, BADGES } from './progress.js';
+import { confetti } from './confetti.js';
 
 const state = {
   authReady: false, // has Firebase said whether someone is signed in?
@@ -16,6 +20,9 @@ const state = {
   settings: { calendarId: '', calendarEmail: '' },
   authMode: 'signin', // or 'signup'
   cal: { status: 'idle', message: '', lastSynced: 0 }, // status: idle | syncing | error
+  photos: new Map(), // cat id → photo (data: URL)
+  period: 'month', // dashboard: 'month' or 'year'
+  animateRings: false, // play the ring animation on the next render only
 };
 const closedDetails = new Set();
 let unsubscribers = [];
@@ -30,6 +37,7 @@ const catForm = document.getElementById('cat-form');
 const recordDialog = document.getElementById('record-dialog');
 const recordForm = document.getElementById('record-form');
 const importInput = document.getElementById('import-file');
+const photoInput = document.getElementById('photo-file');
 // Read inputs through .elements: catForm.name would be the form's own name, not the input.
 const catFields = catForm.elements;
 const recordFields = recordForm.elements;
@@ -48,6 +56,15 @@ const findCat = (id) => state.cats.find((cat) => cat.id === id);
 const byName = (a, b) => a.name.localeCompare(b.name);
 const byDate = (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
 const catLink = (cat) => `#/cat/${encodeURIComponent(cat.id)}`;
+
+/** The cat's photo if it has one, otherwise its cartoon face. */
+function catAvatar(cat, size, { label = '' } = {}) {
+  const photo = state.photos.get(cat.id);
+  if (photo) {
+    return `<img class="cat-photo" src="${esc(photo)}" width="${size}" height="${size}" alt="${esc(label)}"${label ? '' : ' aria-hidden="true"'}>`;
+  }
+  return catFace(coatFor(cat), { size, label });
+}
 const timeZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 const appUrl = () => location.origin + location.pathname;
 
@@ -112,6 +129,7 @@ function dropCat(cat) {
   state.cats = state.cats.filter((c) => c.id !== cat.id);
   render();
   cloud.removeCat(state.user.uid, cat.id).catch((error) => notify(`Couldn’t delete ${cat.name}. ${cloud.friendlyError(error)}`));
+  if (state.photos.delete(cat.id)) cloud.removePhoto(state.user.uid, cat.id).catch(() => {});
   scheduleSync();
 }
 
@@ -338,7 +356,7 @@ function taskRow(item, today, { showCat = false } = {}) {
       </label>
       <span class="type-badge type-${item.type}">${icon(item.type, { size: 22 })}</span>
       <div class="task-text">
-        ${showCat && cat ? `<a class="who" href="${catLink(cat)}">${catFace(coatFor(cat), { size: 20 })}${esc(cat.name)}</a>` : ''}
+        ${showCat && cat ? `<a class="who" href="${catLink(cat)}">${catAvatar(cat, 20)}${esc(cat.name)}</a>` : ''}
         <div class="task-title"><span>${esc(info.name)}</span>${item.label ? `<span class="dose">${esc(item.label)}</span>` : ''}</div>
         <div class="task-meta">${meta.join(' · ')}</div>
       </div>
@@ -420,7 +438,7 @@ function catCard(cat, today) {
   return `
     <li>
       <a class="cat-card" href="${catLink(cat)}">
-        ${catFace(coatFor(cat), { size: 72 })}
+        ${avatarRing(cat, today, catAvatar(cat, 72))}
         <span class="cat-name">${esc(cat.name)}</span>
         <span class="muted small">${esc(ageText(cat.birthDate, today))}</span>
         <span class="chip" data-status="${status.status}">${esc(whenText({ ...status, catchUp: next.catchUp }))}</span>
@@ -457,12 +475,16 @@ function catView(cat, today) {
     <a href="#/" class="back">${icon('back')} All cats</a>
     <section class="card cat-hero">
       <button class="btn small ghost edit" data-action="edit-cat" data-cat="${esc(cat.id)}">Edit</button>
-      ${catFace(coatFor(cat), { size: 110, label: `${cat.name}’s picture` })}
+      <div class="hero-avatar">
+        ${catAvatar(cat, 116, { label: `${cat.name}’s picture` })}
+        <button class="photo-btn" data-action="photo" data-cat="${esc(cat.id)}" aria-label="${state.photos.has(cat.id) ? 'Change' : 'Add'} ${esc(cat.name)}’s photo" title="${state.photos.has(cat.id) ? 'Change photo' : 'Add a photo'}">${icon('camera', { size: 20 })}</button>
+      </div>
       <h1>${esc(cat.name)}</h1>
       <div class="facts">${facts.map((f) => `<span>${esc(f)}</span>`).join('')}</div>
       ${cat.notes ? `<p class="notes">${esc(cat.notes)}</p>` : ''}
       ${summary}
     </section>
+    ${dashboardCard(cat, today, { period: state.period, animate: state.animateRings })}
     <div class="cal-status" data-place="cat">${calendarBanner('cat')}</div>
 
     ${cat.records.length === 0 ? `
@@ -585,6 +607,7 @@ function render() {
 function show(html, title) {
   app.innerHTML = html;
   document.title = title;
+  state.animateRings = false;
 }
 
 // ---------- ticking ----------
@@ -601,9 +624,14 @@ function tick(catId, type) {
   const today = todayISO();
   const record = { id: newId(), type, date: today, product: '', notes: '', nextDue: '' };
   const updated = { ...cat, records: [...cat.records, record] };
+  const before = earnedBadges(cat, today);
+  const after = earnedBadges(updated, today);
+  const fresh = BADGES.filter((b) => after.has(b.id) && !before.has(b.id));
   commitCat(updated);
   const next = nextDue(updated, type, today);
-  notify(`Purr-fect! ${TYPE_INFO[type].name} ticked off for ${cat.name}. Next one: ${formatDate(next.date)}.`, {
+  const badgeText = fresh.length ? ` New badge: ${fresh.map((b) => `${b.emoji} ${b.name}`).join(', ')}!` : '';
+  if (fresh.length) confetti();
+  notify(`Purr-fect! ${TYPE_INFO[type].name} ticked off for ${cat.name}. Next one: ${formatDate(next.date)}.${badgeText}`, {
     action: 'Undo',
     onAction: () => {
       renewCalendarInTap();
@@ -734,9 +762,21 @@ function showError(form, message) {
 }
 
 let editingCatId = null;
+// The photo chosen in the cat form: undefined = unchanged, '' = removed, else a data: URL.
+let dialogPhoto;
+
+function paintPhotoPreview() {
+  const preview = document.getElementById('photo-preview');
+  const current = dialogPhoto === undefined ? (editingCatId ? state.photos.get(editingCatId) ?? '' : '') : dialogPhoto;
+  const coat = catFields.coat.value || coatFor({ name: catFields.name.value || 'cat' });
+  preview.innerHTML = current ? `<img class="cat-photo" src="${esc(current)}" width="72" height="72" alt="">` : catFace(coat, { size: 72 });
+  document.getElementById('photo-remove').hidden = !current;
+  document.getElementById('photo-choose').textContent = current ? 'Change photo' : 'Choose photo';
+}
 
 function openCatDialog(cat = null) {
   editingCatId = cat?.id ?? null;
+  dialogPhoto = undefined;
   catForm.reset();
   showError(catForm, '');
   catDialog.querySelector('#cat-dialog-title').textContent = cat ? `Edit ${cat.name}` : 'Add a cat';
@@ -749,8 +789,52 @@ function openCatDialog(cat = null) {
     catFields.notes.value = cat.notes;
     if (cat.coat) catFields.coat.value = cat.coat;
   }
+  paintPhotoPreview();
   catDialog.showModal();
 }
+
+catForm.addEventListener('change', (event) => {
+  if (event.target.name === 'coat') paintPhotoPreview();
+});
+document.getElementById('photo-choose').addEventListener('click', () => {
+  photoTarget = 'dialog';
+  photoInput.click();
+});
+document.getElementById('photo-remove').addEventListener('click', () => {
+  dialogPhoto = '';
+  paintPhotoPreview();
+});
+
+/** Saves (or with '' removes) a cat's photo; the screen updates straight away. */
+function storePhoto(catId, dataUrl) {
+  if (dataUrl) state.photos.set(catId, dataUrl);
+  else state.photos.delete(catId);
+  render();
+  const saving = dataUrl ? cloud.savePhoto(state.user.uid, catId, dataUrl) : cloud.removePhoto(state.user.uid, catId);
+  saving.catch((error) => notify(`Couldn’t save the photo. ${cloud.friendlyError(error)}`));
+}
+
+// Where a chosen photo goes: 'dialog' (the cat form) or a cat id (the camera button).
+let photoTarget = null;
+photoInput.addEventListener('change', async () => {
+  const file = photoInput.files[0];
+  photoInput.value = '';
+  if (!file || !photoTarget) return;
+  const target = photoTarget;
+  try {
+    const dataUrl = await photoFromFile(file);
+    if (target === 'dialog') {
+      dialogPhoto = dataUrl;
+      paintPhotoPreview();
+    } else if (findCat(target)) {
+      storePhoto(target, dataUrl);
+      notify(`Lovely photo of ${findCat(target).name}!`);
+    }
+  } catch (error) {
+    if (target === 'dialog') showError(catForm, error.message);
+    else notify(error.message);
+  }
+});
 
 catForm.addEventListener('submit', (event) => {
   event.preventDefault();
@@ -777,11 +861,15 @@ catForm.addEventListener('submit', (event) => {
     renewCalendarInTap();
     catDialog.close();
     commitCat({ ...existing, ...fields });
+    if (dialogPhoto !== undefined) storePhoto(existing.id, dialogPhoto);
   } else {
     renewCalendarInTap();
     const cat = { id: newId(), ...fields, records: [] };
     catDialog.close();
+    if (dialogPhoto) state.photos.set(cat.id, dialogPhoto);
     commitCat(cat);
+    if (dialogPhoto) storePhoto(cat.id, dialogPhoto);
+    state.animateRings = true;
     location.hash = catLink(cat);
     notify(`${cat.name}’s schedule is ready! Tick each one off as it’s done.`);
   }
@@ -905,9 +993,16 @@ document.addEventListener('click', (event) => {
     case 'cal-update': return updateCalendarNow();
     case 'cal-disconnect': return disconnectCalendar();
     case 'locked': return notify('That one unlocks once the one before it is ticked off.');
+    case 'period':
+      state.period = target.dataset.period === 'year' ? 'year' : 'month';
+      state.animateRings = true;
+      return render();
   }
   if (!cat) return;
-  if (action === 'edit-cat') openCatDialog(cat);
+  if (action === 'photo') {
+    photoTarget = cat.id;
+    photoInput.click();
+  } else if (action === 'edit-cat') openCatDialog(cat);
   else if (action === 'log') openRecordDialog(cat, { type: target.dataset.type });
   else if (action === 'edit-record') {
     const record = cat.records.find((r) => r.id === target.dataset.record);
@@ -947,6 +1042,7 @@ document.addEventListener('submit', (event) => {
 });
 
 window.addEventListener('hashchange', () => {
+  state.animateRings = currentRoute().view === 'cat';
   render();
   window.scrollTo(0, 0);
 });
@@ -976,6 +1072,7 @@ if (cloud.isConfigured) {
       loadError: '',
       settings: { calendarId: '', calendarEmail: '' },
       cal: { status: 'idle', message: '', lastSynced: 0 },
+      photos: new Map(),
     });
     if (user) {
       calendar.useAccount(user.uid);
@@ -1007,6 +1104,14 @@ if (cloud.isConfigured) {
               scheduleSync(0);
               if (currentRoute().view === 'account') render();
             }
+          },
+          () => {},
+        ),
+        cloud.watchPhotos(
+          user.uid,
+          (photos) => {
+            state.photos = photos;
+            render();
           },
           () => {},
         ),

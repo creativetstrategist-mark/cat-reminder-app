@@ -1,7 +1,7 @@
 // Lets the app open without internet. Always tries the network first so
 // updates show up straight away, and falls back to the saved copy offline.
 
-const CACHE = 'cat-reminders-v5';
+const CACHE = 'cat-reminders-v6';
 const FILES = [
   './',
   './index.html',
@@ -12,8 +12,12 @@ const FILES = [
   './js/calendar.js',
   './js/calendar-plan.js',
   './js/cloud.js',
+  './js/confetti.js',
+  './js/dashboard.js',
   './js/dates.js',
   './js/firebase-config.js',
+  './js/photo.js',
+  './js/progress.js',
   './js/schedule.js',
   './js/store.js',
   './vendor/firebase.js',

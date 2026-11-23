@@ -6,7 +6,9 @@ A friendly, phone-first web app that keeps every cat's deworming and vaccines on
 - **A full schedule from a birthday:** add a cat's name and birthday and the app lays out every upcoming **deworming**, **4-in-1 vaccine** and **anti-rabies vaccine** for the next year, grouped by month.
 - **Tick it off:** tick each dose when it's done. The next one unlocks, later dates adjust, and there's an Undo. Past doses from the vaccine card can be added too, with the vet's next date if they gave one.
 - **Google Calendar reminders:** connect Google Calendar once and every scheduled dose gets an event with a reminder the day before and on the day (9 am). Ticking a dose off removes its reminder, so you're only nagged about what isn't done.
-- **Cat-face avatars** in eight coat colours, and it works offline and installs to your home screen.
+- **Cat photos:** add a photo to each cat from the edit form or the camera button on its page. It's shrunk to a small square JPEG in the browser before saving. Cats without a photo get a cartoon face in one of eight coat colours.
+- **A game-like dashboard** on each cat's page: switch between **This month** and **This year** to see a progress ring for the period, a ring per dose type (done, due now, still to come), the cat's level, its on-time streak and six badges to earn. New badges come with confetti. On the home screen, each cat's photo sits inside a ring showing this year's progress.
+- It works offline and installs to your home screen.
 
 ## Default schedules
 
@@ -74,12 +76,31 @@ No build step for the app itself: plain HTML, CSS and JavaScript modules in [`ap
 | `app/js/cloud.js` | Accounts and saving with Firebase |
 | `app/js/store.js` | Checking cat data and backup files |
 | `app/js/art.js` | Cat faces and icons (SVG) |
+| `app/js/photo.js` | Shrinking and cropping a chosen photo |
+| `app/js/progress.js` | Dashboard numbers: progress per month or year, on-time streak, badges, levels |
+| `app/js/dashboard.js` | The dashboard's ring charts, level, streak and badges |
+| `app/js/confetti.js` | The confetti for new badges |
 | `app/js/app.js` | Screens, forms, ticking and calendar syncing |
 | `app/js/firebase-config.js` | Which Firebase project and Google client to use |
 | `firestore.rules` | Who can read and write what in the database |
 | `app/sw.js` | Offline support |
 
-Data lives at `users/{user id}` (the account's calendar settings) and `users/{user id}/cats/{cat id}` (one document per cat, with its doses inside).
+Data lives at `users/{user id}` (the account's calendar settings), `users/{user id}/cats/{cat id}` (one document per cat, with its doses inside) and `users/{user id}/photos/{cat id}` (each cat's photo as a small JPEG data URL, kept apart so ticking a dose doesn't re-send it). Photos are stored in Firestore rather than Cloud Storage, so the project stays on the free Spark plan.
+
+### Badges
+
+| Badge | Earned when |
+|---|---|
+| 🐾 First steps | Any dose is recorded |
+| 💊 Worm warrior | Deworming is up to date |
+| 💉 Shot star | The first set of 4-in-1 shots is complete |
+| 🛡️ Rabies ready | The anti-rabies shot is up to date |
+| 🔥 Hot streak | The last 3 doses were each given no more than 7 days late |
+| 🏆 Purr-fect month | Everything due this month is done |
+
+Badges can be lost again when something falls overdue. The level is the number of badges (0 Newbie kitten … 6 Legendary cat).
+
+The ring colours were checked with a colour-blindness validator in light and dark mode (see the comments in `app/css/styles.css`).
 
 Install the tools (Node 20 or newer; the database tests also need Java 11 or newer):
 

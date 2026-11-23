@@ -102,6 +102,34 @@ test('badly formed settings are rejected', async () => {
   await assertFails(setDoc(ref, settings({ updatedAt: new Date('2020-01-01') })));
 });
 
+const photo = (extra = {}) => ({ dataUrl: 'data:image/jpeg;base64,/9j/4AAQSkZJRg==', updatedAt: serverTimestamp(), ...extra });
+
+test("a user can save, read and delete their own cats' photos", async () => {
+  const ref = doc(alice(), 'users/alice/photos/cat-1');
+  await assertSucceeds(setDoc(ref, photo()));
+  await assertSucceeds(getDoc(ref));
+  await assertSucceeds(getDocs(collection(alice(), 'users/alice/photos')));
+  await assertSucceeds(deleteDoc(ref));
+});
+
+test("a user cannot see or change another user's photos", async () => {
+  await env.withSecurityRulesDisabled((ctx) => setDoc(doc(ctx.firestore(), 'users/alice/photos/cat-1'), { ...photo(), updatedAt: new Date() }));
+  await assertFails(getDoc(doc(bob(), 'users/alice/photos/cat-1')));
+  await assertFails(getDocs(collection(bob(), 'users/alice/photos')));
+  await assertFails(setDoc(doc(bob(), 'users/alice/photos/cat-1'), photo()));
+  await assertFails(deleteDoc(doc(bob(), 'users/alice/photos/cat-1')));
+  await assertFails(getDoc(doc(guest(), 'users/alice/photos/cat-1')));
+});
+
+test('photos must be small JPEG, PNG or WebP images', async () => {
+  const ref = doc(alice(), 'users/alice/photos/cat-1');
+  await assertFails(setDoc(ref, photo({ dataUrl: 'data:image/svg+xml;base64,PHN2Zz4=' })));
+  await assertFails(setDoc(ref, photo({ dataUrl: 'https://example.com/cat.jpg' })));
+  await assertFails(setDoc(ref, photo({ dataUrl: 'data:image/jpeg;base64,' + 'A'.repeat(300000) })));
+  await assertFails(setDoc(ref, photo({ caption: 'hi' })));
+  await assertFails(setDoc(ref, photo({ updatedAt: new Date('2020-01-01') })));
+});
+
 test('badly formed cats are rejected', async () => {
   const db = alice();
   const bad = [

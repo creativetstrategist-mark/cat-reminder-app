@@ -1,8 +1,10 @@
 rules_version = '2';
 
 // Each account can only read and change its own data:
-//   users/{user id}             the account's settings (its Google Calendar)
-//   users/{user id}/cats/{id}   its cats
+//   users/{user id}               the account's settings (its Google Calendar)
+//   users/{user id}/cats/{id}     its cats
+//   users/{user id}/photos/{id}   each cat's photo (a small JPEG, kept apart so
+//                                 ticking a dose doesn't re-send the photo)
 // Everything else is closed.
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -39,6 +41,16 @@ service cloud.firestore {
     match /users/{userId}/cats/{catId} {
       allow read, delete: if isOwner(userId);
       allow create, update: if isOwner(userId) && isValidCat(request.resource.data);
+    }
+
+    match /users/{userId}/photos/{catId} {
+      allow read, delete: if isOwner(userId);
+      allow create, update: if isOwner(userId)
+        && request.resource.data.keys().hasOnly(['dataUrl', 'updatedAt'])
+        && request.resource.data.dataUrl is string
+        && request.resource.data.dataUrl.size() <= 300000
+        && request.resource.data.dataUrl.matches('^data:image/(jpeg|png|webp);base64,.*')
+        && request.resource.data.updatedAt == request.time;
     }
   }
 }

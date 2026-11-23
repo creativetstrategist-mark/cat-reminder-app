@@ -33,10 +33,21 @@
   </div>
 
   <input type="file" id="import-file" accept="application/json,.json" hidden>
+  <input type="file" id="photo-file" accept="image/*" hidden>
 
   <dialog id="cat-dialog" aria-labelledby="cat-dialog-title">
     <form id="cat-form" novalidate>
       <h2 id="cat-dialog-title">Add a cat</h2>
+      <div class="field photo-field">
+        <span>Photo <em>(optional)</em></span>
+        <div class="photo-row">
+          <div id="photo-preview" class="photo-preview"></div>
+          <div class="row">
+            <button type="button" class="btn small" id="photo-choose">Choose photo</button>
+            <button type="button" class="btn small danger-ghost" id="photo-remove" hidden>Remove</button>
+          </div>
+        </div>
+      </div>
       <label class="field">
         <span>Name</span>
         <input name="name" required maxlength="40" autocomplete="off" placeholder="e.g. Mochi">
@@ -47,7 +58,7 @@
         <small class="hint">Not sure? A guess is fine. Their whole deworming and vaccine schedule is worked out from this date.</small>
       </label>
       <fieldset class="field coat-picker">
-        <legend>Coat <em>(optional)</em></legend>
+        <legend>Coat <em>(optional, used when there’s no photo)</em></legend>
         <div class="coats" id="coat-options"></div>
       </fieldset>
       <label class="field">

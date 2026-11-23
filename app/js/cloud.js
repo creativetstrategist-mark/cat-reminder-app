@@ -64,6 +64,7 @@ if (isConfigured) {
 
 const catsOf = (uid) => collection(db, 'users', uid, 'cats');
 const settingsOf = (uid) => doc(db, 'users', uid);
+const photosOf = (uid) => collection(db, 'users', uid, 'photos');
 
 /** Calls back with the signed-in user, or null, now and whenever it changes. */
 export function watchUser(callback) {
@@ -118,6 +119,30 @@ export function watchSettings(uid, onSettings, onError) {
   );
 }
 
+/** Calls back with a Map of cat id → photo (a data: URL) now and whenever they change. */
+export function watchPhotos(uid, onPhotos, onError) {
+  return onSnapshot(
+    photosOf(uid),
+    (snapshot) => {
+      const photos = new Map();
+      for (const snap of snapshot.docs) {
+        const { dataUrl } = snap.data();
+        if (typeof dataUrl === 'string' && dataUrl.startsWith('data:image/')) photos.set(snap.id, dataUrl);
+      }
+      onPhotos(photos);
+    },
+    onError,
+  );
+}
+
+export function savePhoto(uid, catId, dataUrl) {
+  return setDoc(doc(photosOf(uid), catId), { dataUrl, updatedAt: serverTimestamp() });
+}
+
+export function removePhoto(uid, catId) {
+  return deleteDoc(doc(photosOf(uid), catId));
+}
+
 export function saveSettings(uid, { calendarId = '', calendarEmail = '' }) {
   return setDoc(settingsOf(uid), { calendarId, calendarEmail, updatedAt: serverTimestamp() });
 }
@@ -146,11 +171,11 @@ export function signedInRecently(user, minutes = 5) {
   return Number.isFinite(last) && Date.now() - last < minutes * 60_000;
 }
 
-/** Deletes all of the user's cats and settings, then the account itself. */
+/** Deletes all of the user's cats, photos and settings, then the account itself. */
 export async function deleteAccount(user) {
-  const snapshot = await getDocs(catsOf(user.uid));
+  const [cats, photos] = await Promise.all([getDocs(catsOf(user.uid)), getDocs(photosOf(user.uid))]);
   const batch = writeBatch(db);
-  snapshot.docs.forEach((snap) => batch.delete(snap.ref));
+  [...cats.docs, ...photos.docs].forEach((snap) => batch.delete(snap.ref));
   batch.delete(settingsOf(user.uid));
   await batch.commit();
   await deleteUser(user);

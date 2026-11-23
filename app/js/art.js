@@ -73,6 +73,7 @@ const ICON_PATHS = {
   fvrcp: '<path d="M14.5 4.5 L19.5 9.5 M17 7 L8.5 15.5 L6 15.5 L6 18 M8.5 15.5 L6 18 L4 20 M11 9.5 L14.5 13 M12.5 8 L16 11.5"/>',
   rabies: '<path d="M12 3.5 L19 6 V11.5 C19 16 16 19 12 20.5 C8 19 5 16 5 11.5 V6 Z"/><path d="M9 12 L11.2 14.2 L15.2 10"/>',
   calendar: '<rect x="4" y="5.5" width="16" height="14" rx="3"/><path d="M4 10 H20 M8.5 3.5 V7 M15.5 3.5 V7"/>',
+  camera: '<path d="M4 8.5 a2 2 0 0 1 2 -2 h2 l1.5 -2 h5 l1.5 2 h2 a2 2 0 0 1 2 2 V17 a2 2 0 0 1 -2 2 H6 a2 2 0 0 1 -2 -2 Z"/><circle cx="12" cy="12.5" r="3.5"/>',
   plus: '<path d="M12 5 V19 M5 12 H19"/>',
   back: '<path d="M14.5 5.5 L8 12 L14.5 18.5"/>',
   check: '<path d="M5.5 12.5 L10 17 L18.5 8"/>',
